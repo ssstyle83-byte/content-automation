@@ -6,6 +6,9 @@ import re
 from datetime import datetime
 from dotenv import load_dotenv
 
+from datetime import time as dtime
+
+
 load_dotenv()
 
 # ── 기본 설정 ──────────────────────────────────────
@@ -253,8 +256,11 @@ with tab3:
         st.subheader("예약 설정")
         sch_prompt = st.selectbox("프롬프트", list(prompts.keys()) if prompts else ["없음"])
         sch_keywords = st.text_area("키워드 목록", height=150, placeholder="키워드1\n키워드2\n키워드3")
-        sch_hour   = st.number_input("실행 시(hour)", 0, 23, 9)
-        sch_minute = st.number_input("실행 분(minute)", 0, 59, 0)
+     
+        sch_time = st.time_input("실행 시간", value=dtime(9, 0))
+        sch_hour   = sch_time.hour
+        sch_minute = sch_time.minute
+
         sch_model  = st.selectbox("모델 ", [
             "claude-sonnet-4-5-20250929",
             "claude-haiku-4-5-20251001"
