@@ -3,25 +3,25 @@ import anthropic
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, time as dtime
 from dotenv import load_dotenv
-
-from datetime import time as dtime
-
+from blog_capture import capture_blog
 
 load_dotenv()
 
 # ── 기본 설정 ──────────────────────────────────────
-PROMPTS_FILE = "prompts.json"
-OUTPUTS_DIR  = "outputs"
+PROMPTS_FILE  = "prompts.json"
+PRODUCTS_FILE = "products.json"
+OUTPUTS_DIR   = "outputs"
 SCHEDULE_FILE = "schedule_config.json"
+CAPTURES_DIR  = "captures"
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
+os.makedirs(CAPTURES_DIR, exist_ok=True)
 
 st.set_page_config(page_title="원고 출력 자동화", page_icon="✍️", layout="wide")
 st.title("✍️ 원고 출력 자동화")
 
 # ── 유틸 함수 ──────────────────────────────────────
-
 def load_prompts():
     if os.path.exists(PROMPTS_FILE):
         try:
@@ -34,13 +34,30 @@ def load_prompts():
             return {}
     return {}
 
-
 def save_prompts(prompts):
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(prompts, f, ensure_ascii=False, indent=2)
 
+def load_products():
+    if os.path.exists(PRODUCTS_FILE):
+        try:
+            with open(PRODUCTS_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_products(products):
+    with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(products, f, ensure_ascii=False, indent=2)
+
 def get_client():
     api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        try:
+            api_key = st.secrets.get("ANTHROPIC_API_KEY")
+        except Exception:
+            pass
     if not api_key:
         st.error("API 키가 없습니다. [설정] 탭에서 입력해주세요.")
         return None
@@ -104,7 +121,13 @@ if "results" not in st.session_state:
     st.session_state.results = []
 
 # ── 탭 구성 ───────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📝 원고 생성", "📋 프롬프트 관리", "⏰ 예약 실행", "⚙️ 설정"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📝 원고 생성",
+    "📋 프롬프트 관리",
+    "⏰ 예약 실행",
+    "📸 블로그 캡처",
+    "⚙️ 설정"
+])
 
 
 # ══════════════════════════════════════════════════
@@ -169,13 +192,11 @@ with tab1:
 
                 st.success(f"✅ {len(keywords)}개 원고 생성 완료!")
 
-        # 결과 출력
         if st.session_state.results:
             st.divider()
             for i, r in enumerate(st.session_state.results):
                 label = f"📄 {r['keyword']}  |  {r['chars']:,}자  |  키워드 {r['kw_count']}회  |  {r['time']}"
                 with st.expander(label, expanded=(i == 0)):
-
                     m1, m2, m3 = st.columns(3)
                     m1.metric("글자 수", f"{r['chars']:,}자")
                     m2.metric("키워드 반복", f"{r['kw_count']}회")
@@ -247,21 +268,19 @@ with tab2:
 # TAB 3 : 예약 실행
 # ══════════════════════════════════════════════════
 with tab3:
-    st.info("예약 실행은 **scheduler.py** 를 별도로 실행해야 동작합니다. (아래 안내 참고)")
+    st.info("예약 실행은 **scheduler.py** 를 별도로 실행해야 동작합니다.")
 
     prompts = load_prompts()
     col_a, col_b = st.columns([1, 1])
 
     with col_a:
         st.subheader("예약 설정")
-        sch_prompt = st.selectbox("프롬프트", list(prompts.keys()) if prompts else ["없음"])
+        sch_prompt   = st.selectbox("프롬프트", list(prompts.keys()) if prompts else ["없음"])
         sch_keywords = st.text_area("키워드 목록", height=150, placeholder="키워드1\n키워드2\n키워드3")
-     
-        sch_time = st.time_input("실행 시간", value=dtime(9, 0))
-        sch_hour   = sch_time.hour
-        sch_minute = sch_time.minute
-
-        sch_model  = st.selectbox("모델 ", [
+        sch_time     = st.time_input("실행 시간", value=dtime(9, 0))
+        sch_hour     = sch_time.hour
+        sch_minute   = sch_time.minute
+        sch_model    = st.selectbox("모델 ", [
             "claude-sonnet-4-5-20250929",
             "claude-haiku-4-5-20251001"
         ])
@@ -310,9 +329,79 @@ with tab3:
 
 
 # ══════════════════════════════════════════════════
-# TAB 4 : 설정
+# TAB 4 : 블로그 캡처
 # ══════════════════════════════════════════════════
 with tab4:
+    st.info("⚠️ 이 기능은 로컬 실행 전용입니다. Streamlit Cloud에서는 동작하지 않아요.")
+
+    col_a, col_b = st.columns([1, 1])
+
+    with col_a:
+        st.subheader("제품 목록 관리")
+        products = load_products()
+
+        new_product = st.text_input("새 제품 추가", placeholder="예: 혈압관리")
+        if st.button("➕ 제품 추가"):
+            if new_product and new_product not in products:
+                products.append(new_product)
+                save_products(products)
+                st.success(f"'{new_product}' 추가됨")
+                st.rerun()
+            elif new_product in products:
+                st.warning("이미 등록된 제품입니다.")
+
+        if products:
+            st.write("**등록된 제품:**")
+            for p in products:
+                col_p, col_d = st.columns([3, 1])
+                col_p.write(f"📁 {p}")
+                if col_d.button("삭제", key=f"del_p_{p}"):
+                    products.remove(p)
+                    save_products(products)
+                    st.rerun()
+        else:
+            st.info("등록된 제품이 없습니다.")
+
+    with col_b:
+        st.subheader("블로그 캡처")
+        products = load_products()
+
+        if not products:
+            st.warning("먼저 왼쪽에서 제품을 등록해주세요.")
+        else:
+            selected_product = st.selectbox("저장할 제품 폴더", products)
+            urls_input = st.text_area(
+                "블로그 링크 입력 (줄바꿈으로 여러 개)",
+                height=180,
+                placeholder="https://blog.naver.com/xxx/111\nhttps://blog.naver.com/xxx/222"
+            )
+
+            if st.button("📸 캡처 시작", type="primary", use_container_width=True):
+                if not urls_input.strip():
+                    st.error("링크를 입력해주세요.")
+                else:
+                    urls = [u.strip() for u in urls_input.strip().splitlines() if u.strip()]
+                    progress = st.progress(0)
+
+                    for i, url in enumerate(urls):
+                        with st.spinner(f"[{i+1}/{len(urls)}] 캡처 중..."):
+                            result = capture_blog(url, selected_product)
+
+                        if result["success"]:
+                            st.success(f"✅ {result['filename']} 저장 완료")
+                            st.image(result["path"], caption=result["title"], use_column_width=True)
+                        else:
+                            st.error(f"❌ 실패: {result['error']}")
+
+                        progress.progress((i + 1) / len(urls))
+
+                    st.balloons()
+
+
+# ══════════════════════════════════════════════════
+# TAB 5 : 설정
+# ══════════════════════════════════════════════════
+with tab5:
     st.subheader("Claude API 키")
 
     current = os.getenv("ANTHROPIC_API_KEY", "")
