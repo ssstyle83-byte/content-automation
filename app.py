@@ -389,7 +389,7 @@ with tab4:
 
                         if result["success"]:
                             st.success(f"✅ {result['filename']} 저장 완료")
-                            st.image(result["path"], caption=result["title"], use_column_width=True)
+                            st.image(result["path"], caption=result["title"], use_container_width=True)
                         else:
                             st.error(f"❌ 실패: {result['error']}")
 

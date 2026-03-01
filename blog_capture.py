@@ -5,10 +5,9 @@ import time
 from datetime import datetime
 
 CAPTURES_DIR = "captures"
-PRODUCTS_FILE = "products.json"
 
 def capture_blog(url, product_folder, base_dir=CAPTURES_DIR):
-    """네이버 블로그 본문 캡처"""
+    """네이버 블로그 본문 전체 캡처"""
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -46,15 +45,43 @@ def capture_blog(url, product_folder, base_dir=CAPTURES_DIR):
 
             captured = False
 
-            # 방법 1: iframe 내부 캡처 (네이버 블로그는 iframe 구조)
+            # iframe 방식 시도 (네이버 블로그 주요 구조)
             try:
                 frame = page.frame("mainFrame")
                 if frame:
                     time.sleep(2)
+
+                    # 스크롤해서 전체 콘텐츠 로딩
+                    frame.evaluate("""
+                        async () => {
+                            await new Promise(resolve => {
+                                let totalHeight = 0;
+                                const distance = 300;
+                                const timer = setInterval(() => {
+                                    window.scrollBy(0, distance);
+                                    totalHeight += distance;
+                                    if (totalHeight >= document.body.scrollHeight) {
+                                        clearInterval(timer);
+                                        window.scrollTo(0, 0);
+                                        resolve();
+                                    }
+                                }, 100);
+                            });
+                        }
+                    """)
+                    time.sleep(2)
+
+                    # 본문 전체 높이 가져오기
                     for sel in [".se-main-container", "#postViewArea", ".post-view", "body"]:
                         try:
                             el = frame.locator(sel).first
                             if el.count() > 0:
+                                # 요소 전체 높이로 뷰포트 확장
+                                height = frame.evaluate(
+                                    f"document.querySelector('{sel}').scrollHeight"
+                                )
+                                page.set_viewport_size({"width": 1200, "height": min(height + 100, 30000)})
+                                time.sleep(1)
                                 el.screenshot(path=save_path)
                                 captured = True
                                 break
@@ -63,19 +90,44 @@ def capture_blog(url, product_folder, base_dir=CAPTURES_DIR):
             except Exception:
                 pass
 
-            # 방법 2: 직접 셀렉터
+            # 직접 셀렉터 방식
             if not captured:
+                # 스크롤해서 전체 콘텐츠 로딩
+                page.evaluate("""
+                    async () => {
+                        await new Promise(resolve => {
+                            let totalHeight = 0;
+                            const distance = 300;
+                            const timer = setInterval(() => {
+                                window.scrollBy(0, distance);
+                                totalHeight += distance;
+                                if (totalHeight >= document.body.scrollHeight) {
+                                    clearInterval(timer);
+                                    window.scrollTo(0, 0);
+                                    resolve();
+                                }
+                            }, 100);
+                        });
+                    }
+                """)
+                time.sleep(2)
+
                 for sel in [".se-main-container", "#postViewArea", ".post-view"]:
                     try:
                         el = page.locator(sel).first
                         if el.count() > 0:
+                            height = page.evaluate(
+                                f"document.querySelector('{sel}').scrollHeight"
+                            )
+                            page.set_viewport_size({"width": 1200, "height": min(height + 100, 30000)})
+                            time.sleep(1)
                             el.screenshot(path=save_path)
                             captured = True
                             break
                     except Exception:
                         continue
 
-            # 방법 3: 전체 페이지 (fallback)
+            # 전체 페이지 캡처 (fallback)
             if not captured:
                 page.screenshot(path=save_path, full_page=True)
 
