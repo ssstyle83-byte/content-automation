@@ -6,6 +6,7 @@ import re
 from datetime import datetime, time as dtime
 from dotenv import load_dotenv
 from blog_capture import capture_blog
+from competitor_ui import render_competitor_tab
 
 load_dotenv()
 
@@ -121,11 +122,12 @@ if "results" not in st.session_state:
     st.session_state.results = []
 
 # ── 탭 구성 ───────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📝 원고 생성",
     "📋 프롬프트 관리",
     "⏰ 예약 실행",
     "📸 블로그 캡처",
+    "🔍 경쟁사 분석",
     "⚙️ 설정"
 ])
 
@@ -399,9 +401,16 @@ with tab4:
 
 
 # ══════════════════════════════════════════════════
-# TAB 5 : 설정
+# TAB 5 : 경쟁사 분석
 # ══════════════════════════════════════════════════
 with tab5:
+    render_competitor_tab()
+
+
+# ══════════════════════════════════════════════════
+# TAB 6 : 설정
+# ══════════════════════════════════════════════════
+with tab6:
     st.subheader("Claude API 키")
 
     current = os.getenv("ANTHROPIC_API_KEY", "")
@@ -420,6 +429,34 @@ with tab5:
             st.success("저장 완료! 앱을 재시작하면 반영됩니다.")
         else:
             st.error("키를 입력해주세요.")
+
+    st.divider()
+    st.subheader("네이버 API 키 (경쟁사 분석용)")
+    naver_id = os.getenv("NAVER_CLIENT_ID", "")
+    if naver_id:
+        st.success(f"네이버 Client ID: `{naver_id[:4]}••••`")
+    else:
+        st.warning("네이버 API 키 없음 (경쟁사 분석 시 Playwright만 사용됩니다)")
+
+    st.caption("네이버 API 발급: https://developers.naver.com → 검색 API 신청")
+    n1 = st.text_input("NAVER_CLIENT_ID", placeholder="네이버 Client ID")
+    n2 = st.text_input("NAVER_CLIENT_SECRET", type="password", placeholder="네이버 Client Secret")
+    if st.button("💾 네이버 API 저장"):
+        if n1 and n2:
+            existing = ""
+            if os.path.exists(".env"):
+                with open(".env", "r") as f:
+                    existing = f.read()
+            with open(".env", "w") as f:
+                lines = [l for l in existing.splitlines()
+                         if not l.startswith("NAVER_CLIENT_ID") and not l.startswith("NAVER_CLIENT_SECRET")]
+                lines += [f"NAVER_CLIENT_ID={n1}", f"NAVER_CLIENT_SECRET={n2}"]
+                f.write("\n".join(lines) + "\n")
+            os.environ["NAVER_CLIENT_ID"] = n1
+            os.environ["NAVER_CLIENT_SECRET"] = n2
+            st.success("네이버 API 키 저장 완료!")
+        else:
+            st.error("ID와 Secret을 모두 입력해주세요.")
 
     st.divider()
     st.subheader(f"저장된 원고 ({OUTPUTS_DIR}/)")
