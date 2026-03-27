@@ -4,3 +4,7 @@ outputs/
 __pycache__/
 *.pyc
 .DS_Store
+review_data.db
+review_scheduler.log
+review_schedule_config.json
+captures/
