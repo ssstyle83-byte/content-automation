@@ -1,186 +1,212 @@
 """
-카페24 자사몰 크롤러
+카페24 크롤러 - meditial.co.kr
+구매후기 게시판에서 전체 수집
 """
-import os
+from datetime import datetime, timedelta
 import re
-from datetime import datetime
 from .base import BaseCrawler
 
 
 class Cafe24Crawler(BaseCrawler):
     CHANNEL_NAME = "카페24"
-    BASE_URL = "https://eclogin.cafe24.com/Shop/"
+    LOGIN_URL = ""
 
-    def __init__(self, headless: bool = True):
-        super().__init__(headless)
-        self.mall_id = os.getenv("CAFE24_MALL_ID", "")
-        self.seller_id = os.getenv("CAFE24_ID", "")
-        self.seller_pw = os.getenv("CAFE24_PW", "")
+    STORE_URL = "https://meditial.co.kr"
+    REVIEW_BOARD_URL = "https://meditial.co.kr/board/review/list_photo.html?board_no=4"
 
     def login(self) -> bool:
-        try:
-            login_url = f"https://{self.mall_id}.cafe24.com/admin/php/login.php" if self.mall_id else self.BASE_URL
-            self.page.goto(login_url, wait_until="networkidle")
-            self.sleep(1.5, 2.5)
-
-            # 쇼핑몰 ID 입력 (필요 시)
-            mall_input = self.page.query_selector("input[name='mall_id'], #mall_id")
-            if mall_input and self.mall_id:
-                mall_input.fill(self.mall_id)
-                self.sleep(0.3, 0.5)
-
-            self.page.fill("input[name='user_id'], #user_id", self.seller_id)
-            self.sleep(0.3, 0.5)
-            self.page.fill("input[name='passwd'], #passwd, input[type='password']", self.seller_pw)
-            self.sleep(0.3, 0.5)
-            self.page.click("button[type='submit'], input[type='submit'], .btn_submit")
-            self.sleep(2, 3)
-
-            return "admin" in self.page.url or "cafe24" in self.page.url
-        except Exception as e:
-            print(f"[Cafe24] 로그인 오류: {e}")
-            return False
-
-    def collect_reviews(self, days_back: int = 7) -> list:
-        reviews = []
-        try:
-            # 카페24 관리자 - 상품 후기 관리
-            review_url = f"https://{self.mall_id}.cafe24.com/admin/php/shop1/b_product_review_list.php" if self.mall_id \
-                else "https://eclogin.cafe24.com/Shop/?controller=product_review"
-            self.page.goto(review_url, wait_until="networkidle")
-            self.sleep(2, 3)
-
-            start_date, end_date = self.date_range(days_back)
-
-            # 날짜 필터
-            date_inputs = self.page.query_selector_all("input[name*='date'], input[type='date']")
-            if len(date_inputs) >= 2:
-                date_inputs[0].fill(start_date.replace("-", ""))
-                self.sleep(0.3, 0.5)
-                date_inputs[1].fill(end_date.replace("-", ""))
-                self.sleep(0.3, 0.5)
-
-            search_btn = self.page.query_selector("button:has-text('검색'), input[value='검색']")
-            if search_btn:
-                search_btn.click()
-                self.sleep(1.5, 2.5)
-
-            rows = self.page.query_selector_all("table tbody tr")
-            for row in rows:
-                data = self._parse_review_row(row)
-                if data:
-                    reviews.append(data)
-
-        except Exception as e:
-            print(f"[Cafe24] 리뷰 수집 오류: {e}")
-        return reviews
-
-    def _parse_review_row(self, row) -> object:
-        try:
-            cells = row.query_selector_all("td")
-            if len(cells) < 4:
-                return None
-
-            content_el = row.query_selector(".review_content, td:nth-child(5)")
-            content = content_el.inner_text().strip() if content_el else ""
-
-            rating_el = row.query_selector(".rating, [class*='star']")
-            rating_text = rating_el.inner_text() if rating_el else "0"
-            rating = int(re.search(r'\d', rating_text).group()) if re.search(r'\d', rating_text) else 0
-
-            product_el = row.query_selector(".product_name, td:nth-child(3)")
-            product_name = product_el.inner_text().strip() if product_el else ""
-
-            date_el = row.query_selector(".reg_date, td:last-child")
-            review_date = date_el.inner_text().strip() if date_el else datetime.now().strftime("%Y-%m-%d")
-            review_date = self._normalize_date(review_date)
-
-            customer_el = row.query_selector(".member_id, td:nth-child(2)")
-            customer_id = customer_el.inner_text().strip() if customer_el else ""
-
-            if not content:
-                return None
-
-            return {
-                "channel": self.CHANNEL_NAME,
-                "product_name": product_name,
-                "option_name": "",
-                "customer_id": customer_id,
-                "order_number": "",
-                "rating": rating,
-                "content": content,
-                "review_date": review_date,
-                "review_id_on_channel": "",
-            }
-        except Exception:
-            return None
+        return True
 
     def collect_cs(self, days_back: int = 7) -> list:
-        items = []
-        try:
-            cs_url = f"https://{self.mall_id}.cafe24.com/admin/php/shop1/b_board_list.php" if self.mall_id \
-                else "https://eclogin.cafe24.com/Shop/?controller=inquiry"
-            self.page.goto(cs_url, wait_until="networkidle")
-            self.sleep(2, 3)
-
-            rows = self.page.query_selector_all("table tbody tr")
-            for row in rows:
-                try:
-                    title_el = row.query_selector(".board_title, td:nth-child(3)")
-                    title = title_el.inner_text().strip() if title_el else ""
-
-                    date_el = row.query_selector(".reg_date, td:last-child")
-                    inquiry_date = date_el.inner_text().strip() if date_el else datetime.now().strftime("%Y-%m-%d")
-                    inquiry_date = self._normalize_date(inquiry_date)
-
-                    if not title:
-                        continue
-
-                    items.append({
-                        "channel": self.CHANNEL_NAME,
-                        "product_name": "",
-                        "customer_id": "",
-                        "title": title,
-                        "content": title,
-                        "inquiry_date": inquiry_date,
-                        "item_id": f"c24_{inquiry_date}_{len(items)}",
-                    })
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[Cafe24] CS 수집 오류: {e}")
-        return items
+        return []
 
     def post_review_reply(self, review_id_on_channel: str, reply_text: str) -> bool:
-        try:
-            reply_url = f"https://{self.mall_id}.cafe24.com/admin/php/shop1/b_product_review_detail.php?review_no={review_id_on_channel}"
-            self.page.goto(reply_url, wait_until="networkidle")
-            self.sleep(1.5, 2)
-
-            textarea = self.page.query_selector("textarea[name*='reply'], .reply_content")
-            if not textarea:
-                return False
-            textarea.fill(reply_text)
-            self.sleep(0.5, 1)
-
-            submit = self.page.query_selector("button:has-text('저장'), input[value='저장']")
-            if submit:
-                submit.click()
-                self.sleep(1.5, 2)
-                return True
-        except Exception as e:
-            print(f"[Cafe24] 리뷰 답변 오류: {e}")
         return False
 
     def post_cs_reply(self, cs_id_on_channel: str, reply_text: str) -> bool:
-        return False  # 카페24 문의 답변은 채널마다 구조 상이 → 추후 구현
+        return False
 
     def _normalize_date(self, date_str: str) -> str:
         date_str = date_str.strip()
         m = re.search(r'(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})', date_str)
         if m:
             return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
-        m2 = re.search(r'(\d{4})(\d{2})(\d{2})', date_str)
+        m2 = re.search(r'(\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})', date_str)
         if m2:
-            return f"{m2.group(1)}-{m2.group(2)}-{m2.group(3)}"
+            year = int(m2.group(1))
+            year = 2000 + year if year < 100 else year
+            return f"{year}-{int(m2.group(2)):02d}-{int(m2.group(3)):02d}"
+        return ""
+
+    def _parse_date(self, date_text: str) -> str:
+        if date_text:
+            result = self._normalize_date(date_text)
+            if result:
+                return result
+            m = re.search(r'(\d+)일 전', date_text)
+            if m:
+                return (datetime.now() - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
+            if '어제' in date_text:
+                return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            if '오늘' in date_text or '방금' in date_text:
+                return datetime.now().strftime("%Y-%m-%d")
         return datetime.now().strftime("%Y-%m-%d")
+
+    def collect_reviews(self, days_back: int = 7) -> list:
+        reviews = []
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+
+        print(f"[{self.CHANNEL_NAME}] 구매후기 게시판 수집 시작", flush=True)
+        self._collect_from_board(reviews, cutoff_date)
+
+        print(f"[{self.CHANNEL_NAME}] 총 {len(reviews)}개 리뷰 수집 완료", flush=True)
+        return reviews
+
+    def _collect_from_board(self, reviews: list, cutoff_date: datetime):
+        page_num = 1
+
+        while True:
+            url = f"{self.REVIEW_BOARD_URL}&page={page_num}"
+            print(f"[{self.CHANNEL_NAME}] 게시판 페이지 {page_num}", flush=True)
+
+            try:
+                self.page.goto(url, wait_until="networkidle", timeout=20000)
+                self.sleep(1.5, 2.0)
+            except Exception as e:
+                print(f"[{self.CHANNEL_NAME}] 페이지 로드 실패: {e}", flush=True)
+                break
+
+            # 리뷰 요소 로딩 대기 (실패해도 계속)
+            try:
+                self.page.wait_for_selector(
+                    "li[class*='review']",
+                    state="attached", timeout=10000
+                )
+            except Exception:
+                # 로딩 실패 시 페이지 내용 직접 확인
+                pass
+
+            items = self.page.evaluate("""
+                () => {
+                    const els = Array.from(document.querySelectorAll('li[class*="review"]'));
+                    if (els.length === 0) return [];
+                    return els
+                        .filter(el => el instanceof HTMLElement)
+                        .map(el => {
+                            // 내용: 가장 긴 텍스트 블록
+                            let content = '';
+                            const candidates = el.querySelectorAll(
+                                'p, [class*="cont"], [class*="text"], [class*="desc"], [class*="review_cont"], span'
+                            );
+                            for (const c of candidates) {
+                                const t = (c.innerText || '').trim();
+                                if (t.length > content.length) content = t;
+                            }
+                            if (!content) content = (el.innerText || '').trim().substring(0, 1000);
+
+                            // 날짜
+                            let dateText = '';
+                            for (const de of el.querySelectorAll('*')) {
+                                const cls = (de.className || '').toString();
+                                if (cls.includes('date') || de.tagName === 'TIME') {
+                                    const t = (de.innerText || de.getAttribute('datetime') || '').trim();
+                                    if (t) { dateText = t; break; }
+                                }
+                            }
+
+                            // 별점
+                            const starEl = el.querySelector(
+                                '[class*="star"] em, [class*="rating"] em, [class*="score"] em, [class*="star"]'
+                            );
+                            const starText = starEl
+                                ? (starEl.innerText || starEl.getAttribute('style') || '').trim()
+                                : '';
+
+                            // 상품명
+                            const prdEl = el.querySelector(
+                                'a[href*="product_no"], [class*="prd_name"], [class*="product_name"]'
+                            );
+                            const productName = prdEl ? (prdEl.innerText || '').trim().substring(0, 150) : '';
+
+                            // 리뷰 ID
+                            const linkEl = el.querySelector('a[href*="board_no"], a[href*="no="]');
+                            const href = linkEl ? (linkEl.getAttribute('href') || '') : '';
+                            const idMatch = href.match(/no=(\\d+)/);
+                            const reviewId = idMatch ? idMatch[1] : (el.id || '');
+
+                            // 작성자
+                            const authorEl = el.querySelector(
+                                '[class*="writer"], [class*="author"], [class*="user_id"]'
+                            );
+                            const author = authorEl ? (authorEl.innerText || '').trim() : '';
+
+                            return { content, dateText, starText, productName, reviewId, author };
+                        });
+                }
+            """)
+
+            if not items:
+                print(f"[{self.CHANNEL_NAME}] 페이지 {page_num}: 리뷰 없음", flush=True)
+                break
+
+            parsed_count = 0
+            stop = False
+            for item in items:
+                try:
+                    content = (item.get('content') or '').strip()
+                    if len(content) < 15:
+                        continue
+
+                    review_date = self._parse_date(item.get('dateText', ''))
+
+                    try:
+                        rd = datetime.strptime(review_date, "%Y-%m-%d")
+                        if rd < cutoff_date:
+                            stop = True
+                            break
+                    except Exception:
+                        pass
+
+                    rating = 5
+                    star_text = item.get('starText', '')
+                    rm = re.search(r'(\d+)', star_text)
+                    if rm:
+                        rating = min(5, max(1, int(rm.group(1))))
+
+                    reviews.append({
+                        "channel": self.CHANNEL_NAME,
+                        "product_name": (item.get('productName') or '').strip(),
+                        "option_name": "",
+                        "customer_id": (item.get('author') or '').strip(),
+                        "order_number": "",
+                        "rating": rating,
+                        "content": content,
+                        "review_date": review_date,
+                        "review_id_on_channel": (item.get('reviewId') or '').strip(),
+                    })
+                    parsed_count += 1
+                except Exception:
+                    continue
+
+            print(f"[{self.CHANNEL_NAME}] 페이지 {page_num}: {parsed_count}개 파싱 (전체 {len(items)}개 중)", flush=True)
+
+            if stop:
+                break
+
+            has_next = self.page.evaluate("""
+                () => {
+                    const btns = Array.from(document.querySelectorAll('a'));
+                    return btns.some(a =>
+                        (a.innerText || '').trim() === '다음' ||
+                        (a.className || '').includes('next')
+                    );
+                }
+            """)
+            if not has_next:
+                break
+
+            page_num += 1
+            self.sleep(1.0, 2.0)
+
+            if page_num > 100:
+                break

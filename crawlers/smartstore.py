@@ -1,409 +1,361 @@
 """
-네이버 스마트스토어 크롤러
-- 리뷰 수집 + 주문번호로 실제 고객 아이디 추출
-- 리뷰 답변 자동 등록
-- CS/문의 수집 및 답변 등록
+네이버 스마트스토어 크롤러 - brand.naver.com/meditial
+공개 쇼핑몰 페이지 크롤링 (로그인 불필요)
 """
-import os
-import re
 from datetime import datetime, timedelta
+import re
 from .base import BaseCrawler
 
 
 class SmartStoreCrawler(BaseCrawler):
     CHANNEL_NAME = "스마트스토어"
-    LOGIN_URL = "https://sell.smartstore.naver.com/#/home/dashboard"
-    REVIEW_URL = "https://sell.smartstore.naver.com/#/review/list"
-    CS_URL = "https://sell.smartstore.naver.com/#/qna/list"
+    LOGIN_URL = ""
 
-    def __init__(self, headless: bool = True):
-        super().__init__(headless)
-        self.seller_id = os.getenv("SMARTSTORE_ID", "")
-        self.seller_pw = os.getenv("SMARTSTORE_PW", "")
-
-    # ── 로그인 ────────────────────────────────────────
+    BRAND_URL = "https://brand.naver.com/meditial"
 
     def login(self) -> bool:
-        try:
-            self.page.goto("https://nid.naver.com/nidlogin.login", wait_until="networkidle")
-            self.sleep(1, 2)
-
-            # 아이디 입력
-            self.page.fill("#id", self.seller_id)
-            self.sleep(0.3, 0.7)
-            self.page.fill("#pw", self.seller_pw)
-            self.sleep(0.3, 0.7)
-            self.page.click(".btn_login")
-            self.sleep(2, 3)
-
-            # 2차 인증 대기 (최대 60초)
-            for _ in range(60):
-                if "smartstore" in self.page.url or "sell.smartstore" in self.page.url:
-                    break
-                if "nid.naver.com/login" not in self.page.url and "nid.naver.com/nidlogin" not in self.page.url:
-                    break
-                self.sleep(1, 1)
-
-            # 판매자센터 접근
-            self.page.goto(self.LOGIN_URL, wait_until="networkidle")
-            self.sleep(2, 3)
-            return "sell.smartstore.naver.com" in self.page.url
-        except Exception as e:
-            print(f"[SmartStore] 로그인 오류: {e}")
-            return False
-
-    # ── 리뷰 수집 ────────────────────────────────────
-
-    def collect_reviews(self, days_back: int = 7) -> list:
-        reviews = []
-        try:
-            self.page.goto(self.REVIEW_URL, wait_until="networkidle")
-            self.sleep(2, 3)
-
-            # 날짜 필터 설정 (기간 선택 UI)
-            start_date, end_date = self.date_range(days_back)
-            self._set_date_filter(start_date, end_date)
-            self.sleep(1, 2)
-
-            page_num = 1
-            while True:
-                rows = self._parse_review_rows()
-                if not rows:
-                    break
-                reviews.extend(rows)
-
-                # 다음 페이지
-                next_btn = self.page.query_selector(".pagination .next:not(.disabled)")
-                if not next_btn:
-                    break
-                next_btn.click()
-                self.sleep(1.5, 2.5)
-                page_num += 1
-                if page_num > 20:  # 안전 상한
-                    break
-
-        except Exception as e:
-            print(f"[SmartStore] 리뷰 수집 오류: {e}")
-
-        return reviews
-
-    def _set_date_filter(self, start_date: str, end_date: str):
-        """날짜 필터 입력 (YYYY-MM-DD 형식)."""
-        try:
-            # 직접 입력 방식 시도
-            date_inputs = self.page.query_selector_all("input[type='date'], input.datepicker")
-            if len(date_inputs) >= 2:
-                date_inputs[0].fill(start_date)
-                self.sleep(0.3, 0.5)
-                date_inputs[1].fill(end_date)
-                self.sleep(0.3, 0.5)
-                # 검색 버튼 클릭
-                search_btn = self.page.query_selector("button[class*='search'], button:has-text('조회')")
-                if search_btn:
-                    search_btn.click()
-                    self.sleep(1.5, 2.5)
-        except Exception as e:
-            print(f"[SmartStore] 날짜 필터 설정 오류: {e}")
-
-    def _parse_review_rows(self) -> list:
-        rows = []
-        try:
-            # 리뷰 행 파싱 (스마트스토어 리뷰 테이블 구조)
-            review_rows = self.page.query_selector_all("table tbody tr, .review-list-item")
-            for row in review_rows:
-                try:
-                    data = self._extract_review_data(row)
-                    if data:
-                        rows.append(data)
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[SmartStore] 리뷰 행 파싱 오류: {e}")
-        return rows
-
-    def _extract_review_data(self, row) -> object:
-        try:
-            # 평점 (별점 이미지 또는 숫자)
-            rating_el = row.query_selector(".rating, .star-rating, [class*='rating']")
-            rating_text = rating_el.inner_text().strip() if rating_el else ""
-            rating = int(re.search(r'\d', rating_text).group()) if re.search(r'\d', rating_text) else 0
-
-            # 리뷰 내용
-            content_el = row.query_selector(".review-content, .review-text, td:nth-child(4)")
-            content = content_el.inner_text().strip() if content_el else ""
-
-            # 상품명
-            product_el = row.query_selector(".product-name, td:nth-child(2)")
-            product_name = product_el.inner_text().strip() if product_el else ""
-
-            # 옵션
-            option_el = row.query_selector(".option-name, .product-option")
-            option_name = option_el.inner_text().strip() if option_el else ""
-
-            # 주문번호 (고객ID 추출에 사용)
-            order_el = row.query_selector(".order-number, [class*='order']")
-            order_number = order_el.inner_text().strip() if order_el else ""
-            order_number = re.sub(r'\D', '', order_number)  # 숫자만 추출
-
-            # 날짜
-            date_el = row.query_selector(".review-date, td:nth-child(6)")
-            review_date = date_el.inner_text().strip() if date_el else datetime.now().strftime("%Y-%m-%d")
-            review_date = self._normalize_date(review_date)
-
-            # 고객 아이디 (별표 처리 → 주문번호로 별도 조회)
-            customer_id = ""
-            if order_number:
-                customer_id = self._get_customer_id_by_order(order_number)
-
-            # 리뷰 ID (답변 등록 시 필요)
-            review_id = ""
-            link_el = row.query_selector("a[href*='review']")
-            if link_el:
-                href = link_el.get_attribute("href") or ""
-                id_match = re.search(r'[?&]id=(\d+)', href)
-                if id_match:
-                    review_id = id_match.group(1)
-
-            if not content:
-                return None
-
-            return {
-                "channel": self.CHANNEL_NAME,
-                "product_name": product_name,
-                "option_name": option_name,
-                "customer_id": customer_id,
-                "order_number": order_number,
-                "rating": rating,
-                "content": content,
-                "review_date": review_date,
-                "review_id_on_channel": review_id,
-            }
-        except Exception:
-            return None
-
-    def _get_customer_id_by_order(self, order_number: str) -> str:
-        """주문번호로 실제 고객 아이디 추출 (별표 처리 해소 핵심 기능)."""
-        if not order_number:
-            return ""
-        try:
-            order_url = f"https://sell.smartstore.naver.com/#/order/detail/{order_number}"
-            # 새 탭에서 주문 상세 열기
-            new_page = self._context.new_page()
-            new_page.goto(order_url, wait_until="networkidle")
-            self.sleep(1.5, 2.5)
-
-            # 고객 아이디 추출 (구매자 정보 섹션)
-            customer_id = ""
-            selectors = [
-                ".buyer-id", ".orderer-id", "[class*='buyer'] .id",
-                "td:has-text('구매자') + td", ".customer-info .id"
-            ]
-            for sel in selectors:
-                el = new_page.query_selector(sel)
-                if el:
-                    text = el.inner_text().strip()
-                    if text and "*" not in text:
-                        customer_id = text
-                        break
-
-            # 페이지 내 텍스트에서 아이디 패턴 검색
-            if not customer_id:
-                page_text = new_page.content()
-                # 네이버 아이디 패턴: 영문+숫자 조합
-                id_patterns = re.findall(r'"buyerId"\s*:\s*"([a-z0-9_]+)"', page_text)
-                if id_patterns:
-                    customer_id = id_patterns[0]
-
-            new_page.close()
-            return customer_id
-        except Exception as e:
-            print(f"[SmartStore] 고객 아이디 조회 오류 ({order_number}): {e}")
-            return ""
-
-    # ── CS/문의 수집 ──────────────────────────────────
+        return True
 
     def collect_cs(self, days_back: int = 7) -> list:
-        cs_items = []
-        try:
-            self.page.goto(self.CS_URL, wait_until="networkidle")
-            self.sleep(2, 3)
-
-            start_date, end_date = self.date_range(days_back)
-            self._set_date_filter(start_date, end_date)
-            self.sleep(1, 2)
-
-            page_num = 1
-            while True:
-                rows = self._parse_cs_rows()
-                if not rows:
-                    break
-                cs_items.extend(rows)
-
-                next_btn = self.page.query_selector(".pagination .next:not(.disabled)")
-                if not next_btn:
-                    break
-                next_btn.click()
-                self.sleep(1.5, 2.5)
-                page_num += 1
-                if page_num > 10:
-                    break
-
-        except Exception as e:
-            print(f"[SmartStore] CS 수집 오류: {e}")
-
-        return cs_items
-
-    def _parse_cs_rows(self) -> list:
-        items = []
-        try:
-            rows = self.page.query_selector_all("table tbody tr, .qna-list-item")
-            for row in rows:
-                try:
-                    # 제목/내용
-                    title_el = row.query_selector(".qna-title, td:nth-child(3)")
-                    title = title_el.inner_text().strip() if title_el else ""
-
-                    # 상세 내용은 클릭 후 수집
-                    content = title  # 간략 내용은 제목으로 대체
-
-                    # 상품명
-                    product_el = row.query_selector(".product-name, td:nth-child(2)")
-                    product_name = product_el.inner_text().strip() if product_el else ""
-
-                    # 날짜
-                    date_el = row.query_selector(".inquiry-date, td:nth-child(5)")
-                    inquiry_date = date_el.inner_text().strip() if date_el else datetime.now().strftime("%Y-%m-%d")
-                    inquiry_date = self._normalize_date(inquiry_date)
-
-                    # 문의 아이디 (답변 등록 시 필요)
-                    item_id = ""
-                    link_el = row.query_selector("a")
-                    if link_el:
-                        href = link_el.get_attribute("href") or ""
-                        id_match = re.search(r'[/=](\d{10,})', href)
-                        if id_match:
-                            item_id = id_match.group(1)
-
-                    if not title:
-                        continue
-
-                    items.append({
-                        "channel": self.CHANNEL_NAME,
-                        "product_name": product_name,
-                        "customer_id": "",
-                        "title": title,
-                        "content": content,
-                        "inquiry_date": inquiry_date,
-                        "item_id": item_id or f"ss_{inquiry_date}_{len(items)}",
-                    })
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[SmartStore] CS 행 파싱 오류: {e}")
-        return items
-
-    # ── 답변 등록 ─────────────────────────────────────
+        return []
 
     def post_review_reply(self, review_id_on_channel: str, reply_text: str) -> bool:
-        try:
-            # 리뷰 상세 페이지로 이동
-            url = f"https://sell.smartstore.naver.com/#/review/list"
-            self.page.goto(url, wait_until="networkidle")
-            self.sleep(1.5, 2)
-
-            # 리뷰 ID로 해당 행 찾기
-            row = self.page.query_selector(f"[data-review-id='{review_id_on_channel}'], tr[data-id='{review_id_on_channel}']")
-            if not row:
-                # 검색으로 찾기
-                print(f"[SmartStore] 리뷰 ID {review_id_on_channel} 직접 접근 시도")
-                return self._post_reply_via_search(review_id_on_channel, reply_text)
-
-            # 답변 버튼 클릭
-            reply_btn = row.query_selector("button:has-text('답변'), .reply-btn")
-            if reply_btn:
-                reply_btn.click()
-                self.sleep(1, 1.5)
-
-            # 답변 입력
-            textarea = self.page.query_selector("textarea.reply-input, .reply-area textarea")
-            if not textarea:
-                return False
-            textarea.fill(reply_text)
-            self.sleep(0.5, 1)
-
-            # 등록 버튼
-            submit_btn = self.page.query_selector("button:has-text('등록'), button:has-text('저장')")
-            if submit_btn:
-                submit_btn.click()
-                self.sleep(1.5, 2)
-                return True
-        except Exception as e:
-            print(f"[SmartStore] 리뷰 답변 등록 오류: {e}")
-        return False
-
-    def _post_reply_via_search(self, review_id: str, reply_text: str) -> bool:
-        """리뷰를 직접 검색하여 답변 등록."""
-        try:
-            # 리뷰 페이지에서 ID로 검색
-            self.page.goto(
-                f"https://sell.smartstore.naver.com/#/review/detail/{review_id}",
-                wait_until="networkidle"
-            )
-            self.sleep(1.5, 2.5)
-
-            textarea = self.page.query_selector("textarea, .reply-input")
-            if not textarea:
-                return False
-            textarea.fill(reply_text)
-            self.sleep(0.5, 1)
-
-            submit_btn = self.page.query_selector("button:has-text('등록'), button[type='submit']")
-            if submit_btn:
-                submit_btn.click()
-                self.sleep(1.5, 2)
-                return True
-        except Exception as e:
-            print(f"[SmartStore] 검색 답변 등록 오류: {e}")
         return False
 
     def post_cs_reply(self, cs_id_on_channel: str, reply_text: str) -> bool:
-        try:
-            self.page.goto(
-                f"https://sell.smartstore.naver.com/#/qna/detail/{cs_id_on_channel}",
-                wait_until="networkidle"
-            )
-            self.sleep(1.5, 2.5)
-
-            textarea = self.page.query_selector("textarea, .answer-input")
-            if not textarea:
-                return False
-            textarea.fill(reply_text)
-            self.sleep(0.5, 1)
-
-            submit_btn = self.page.query_selector("button:has-text('등록'), button:has-text('답변'), button[type='submit']")
-            if submit_btn:
-                submit_btn.click()
-                self.sleep(1.5, 2)
-                return True
-        except Exception as e:
-            print(f"[SmartStore] CS 답변 등록 오류: {e}")
         return False
 
-    # ── 유틸 ──────────────────────────────────────────
-
     def _normalize_date(self, date_str: str) -> str:
-        """다양한 날짜 형식을 YYYY-MM-DD로 정규화."""
         date_str = date_str.strip()
-        patterns = [
-            (r'(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})', '{}-{:02d}-{:02d}'),
-            (r'(\d{4})(\d{2})(\d{2})', '{}-{}-{}'),
-        ]
-        for pattern, fmt in patterns:
-            m = re.search(pattern, date_str)
-            if m:
-                g = m.groups()
-                try:
-                    return fmt.format(int(g[0]), int(g[1]), int(g[2]))
-                except Exception:
-                    pass
+        m = re.search(r'(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})', date_str)
+        if m:
+            return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        m2 = re.search(r'(\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})', date_str)
+        if m2:
+            year = int(m2.group(1))
+            year = 2000 + year if year < 100 else year
+            return f"{year}-{int(m2.group(2)):02d}-{int(m2.group(3)):02d}"
         return datetime.now().strftime("%Y-%m-%d")
+
+    def collect_reviews(self, days_back: int = 7) -> list:
+        reviews = []
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+
+        print(f"[{self.CHANNEL_NAME}] 브랜드 스토어 상품 목록 수집 시작", flush=True)
+        product_ids = self._get_product_ids()
+        print(f"[{self.CHANNEL_NAME}] 상품 {len(product_ids)}개 발견", flush=True)
+
+        for product_id in product_ids:
+            self._collect_product_reviews(product_id, reviews, days_back, cutoff_date)
+            self.sleep(1.5, 2.5)
+
+        print(f"[{self.CHANNEL_NAME}] 총 {len(reviews)}개 리뷰 수집 완료", flush=True)
+        return reviews
+
+    def _get_product_ids(self) -> list:
+        seen = set()
+        product_ids = []
+
+        urls_to_try = [
+            self.BRAND_URL,
+            f"{self.BRAND_URL}/category/ALL",
+        ]
+
+        for url in urls_to_try:
+            print(f"[{self.CHANNEL_NAME}] 상품 목록: {url}", flush=True)
+            try:
+                self.page.goto(url, wait_until="networkidle", timeout=25000)
+                self.sleep(3.0, 4.0)
+            except Exception as e:
+                print(f"[{self.CHANNEL_NAME}] 상품 목록 로드 실패: {e}", flush=True)
+                continue
+
+            print(f"[{self.CHANNEL_NAME}] 페이지 타이틀: {self.page.title()}", flush=True)
+
+            # a.href property 기반 JS 추출 (React SPA resolved URL)
+            ids = self.page.evaluate("""
+                () => {
+                    const ids = [];
+                    const seen = new Set();
+                    Array.from(document.querySelectorAll('a')).forEach(a => {
+                        const href = a.href || '';
+                        const m = href.match(/\\/meditial\\/products\\/(\\d+)/);
+                        if (m && !seen.has(m[1])) {
+                            seen.add(m[1]);
+                            ids.push(m[1]);
+                        }
+                    });
+                    console.log('[SmartStore] found product ids:', ids.length);
+                    return ids;
+                }
+            """)
+            print(f"[{self.CHANNEL_NAME}] 이 페이지 상품 {len(ids)}개 발견", flush=True)
+            for pid in ids:
+                if pid not in seen:
+                    seen.add(pid)
+                    product_ids.append(pid)
+
+        return product_ids
+
+    def _extract_reviews_from_frame(self, frame):
+        """프레임에서 리뷰 JS 추출 - 전체 DOM 스캔 (obfuscated class 대응)."""
+        return frame.evaluate("""
+            () => {
+                const DATE_RE = /\\d{4}[.\\-\\/]\\d{1,2}[.\\-\\/]\\d{1,2}/;
+                const results = [];
+                const seen = new Set();
+
+                // 전체 DOM 스캔: 날짜를 포함하되 자식 중 날짜 포함 자식이 없는 leaf 요소 탐색
+                const allEls = Array.from(document.querySelectorAll(
+                    'li, article, [data-review-id], [data-id]'
+                ));
+
+                // fallback: 모든 요소 스캔
+                const candidates = allEls.length > 0 ? allEls :
+                    Array.from(document.querySelectorAll('*'));
+
+                for (const el of candidates) {
+                    const fullText = (el.innerText || '').trim();
+                    if (fullText.length < 30 || fullText.length > 3000) continue;
+                    if (!DATE_RE.test(fullText)) continue;
+                    if (seen.has(fullText)) continue;
+
+                    // 자식 중 날짜 포함한 자식이 있으면 부모 컨테이너이므로 스킵
+                    // (리뷰 목록 전체 컨테이너가 아닌 개별 리뷰 항목을 찾기 위해)
+                    let childHasDate = false;
+                    for (const child of el.children) {
+                        const ct = (child.innerText || '').trim();
+                        if (ct.length > 20 && DATE_RE.test(ct)) {
+                            childHasDate = true;
+                            break;
+                        }
+                    }
+                    if (childHasDate) continue;
+
+                    seen.add(fullText);
+
+                    const dateMatch = fullText.match(/(\\d{4})[.\\-\\/](\\d{1,2})[.\\-\\/](\\d{1,2})/);
+                    const dateStr = dateMatch
+                        ? dateMatch[1] + '.' + dateMatch[2] + '.' + dateMatch[3]
+                        : '';
+
+                    let rating = 5;
+                    const ratingEl = el.querySelector('[aria-label*="점"], [title*="점"]');
+                    if (ratingEl) {
+                        const rl = ratingEl.getAttribute('aria-label') || ratingEl.getAttribute('title') || '';
+                        const rm = rl.match(/(\\d+)/);
+                        if (rm) rating = Math.min(5, Math.max(1, parseInt(rm[1])));
+                    }
+                    // style width% 기반 별점
+                    el.querySelectorAll('[style*="width"]').forEach(se => {
+                        const wm = (se.getAttribute('style') || '').match(/width:\\s*(\\d+(\\.\\d+)?)%/);
+                        if (wm) {
+                            const r = Math.round(parseFloat(wm[1]) / 20);
+                            if (r >= 1 && r <= 5) rating = r;
+                        }
+                    });
+
+                    const lines = fullText.split('\\n').map(t => t.trim()).filter(t => t.length > 0);
+                    let content = '';
+                    for (const line of lines) {
+                        if (DATE_RE.test(line)) continue;
+                        if (/^[\\d,\\s점★☆]+$/.test(line)) continue;
+                        if (line.length > content.length) content = line;
+                    }
+                    if (!content) content = fullText.substring(0, 500);
+                    if (content.length < 10) continue;
+
+                    const reviewId = el.getAttribute('data-review-id') || el.getAttribute('data-id') || el.id || '';
+
+                    results.push({ content, dateStr, rating, productName: '', reviewId });
+                }
+                return results;
+            }
+        """)
+
+    def _click_review_tab_in_frame(self, frame) -> bool:
+        """프레임 안에서 리뷰 탭 클릭 시도."""
+        for tab_sel in [
+            "a:has-text('리뷰')",
+            "button:has-text('리뷰')",
+            "[role='tab']:has-text('리뷰')",
+            "li:has-text('리뷰') a",
+            "li:has-text('리뷰') button",
+        ]:
+            try:
+                tab = frame.query_selector(tab_sel)
+                if tab and tab.is_visible():
+                    tab.click()
+                    self.sleep(2.0, 3.0)
+                    print(f"[{self.CHANNEL_NAME}] 프레임 리뷰 탭 클릭 성공: {tab_sel}", flush=True)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _collect_product_reviews(self, product_id: str, reviews: list, days_back: int, cutoff_date: datetime):
+        # #REVIEW 앵커로 직접 리뷰 섹션 이동
+        url = f"https://brand.naver.com/meditial/products/{product_id}#REVIEW"
+        print(f"[{self.CHANNEL_NAME}] 상품 {product_id} 리뷰 수집: {url}", flush=True)
+
+        try:
+            self.page.goto(url, wait_until="networkidle", timeout=30000)
+            self.sleep(3.0, 4.0)
+        except Exception as e:
+            print(f"[{self.CHANNEL_NAME}] 상품 {product_id} 페이지 로드 실패: {e}", flush=True)
+            return
+
+        # 모든 프레임 목록 로그
+        all_frames = self.page.frames
+        print(f"[{self.CHANNEL_NAME}] 상품 {product_id} 프레임 수: {len(all_frames)}", flush=True)
+        for i, fr in enumerate(all_frames):
+            print(f"[{self.CHANNEL_NAME}]   프레임[{i}]: {fr.url}", flush=True)
+
+        # 리뷰 탭 클릭 — #REVIEW 앵커로 이미 이동했지만 탭도 클릭 시도
+        for tab_sel in [
+            "[role='tab']:has-text('리뷰')",
+            "a:has-text('리뷰')",
+            "button:has-text('리뷰')",
+        ]:
+            try:
+                tab = self.page.query_selector(tab_sel)
+                if tab and tab.is_visible():
+                    tab.click()
+                    self.sleep(2.0, 3.0)
+                    print(f"[{self.CHANNEL_NAME}] 리뷰 탭 클릭: {tab_sel}", flush=True)
+                    break
+            except Exception:
+                continue
+
+        # 각 프레임에서도 탭 클릭 시도
+        for i, fr in enumerate(self.page.frames):
+            if "naver.com" in fr.url and fr.url != self.page.url:
+                self._click_review_tab_in_frame(fr)
+
+        # 리뷰 섹션 스크롤 → lazy loading 트리거
+        self.page.evaluate("""
+            () => {
+                const el = document.querySelector(
+                    '[class*="review"], [id*="review"], [id="REVIEW"]'
+                );
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+                else window.scrollBy(0, window.innerHeight * 2);
+            }
+        """)
+        self.sleep(2.0, 3.0)
+
+        # 리뷰 요소 로딩 대기 (메인 페이지 또는 프레임)
+        for fr in [self.page] + list(self.page.frames):
+            try:
+                fr.wait_for_selector(
+                    "ul > li, [class*='review'] li, [class*='Review'] li",
+                    state="attached", timeout=5000
+                )
+                break
+            except Exception:
+                continue
+
+        page_num = 1
+        stop = False
+
+        while not stop:
+            # 메인 페이지 + 모든 프레임에서 리뷰 추출 시도
+            items = []
+
+            # 메인 페이지
+            try:
+                main_items = self._extract_reviews_from_frame(self.page)
+                if main_items:
+                    items = main_items
+                    print(f"[{self.CHANNEL_NAME}] 메인 페이지에서 {len(items)}개 후보", flush=True)
+            except Exception as e:
+                print(f"[{self.CHANNEL_NAME}] 메인 페이지 추출 오류: {e}", flush=True)
+
+            # 프레임들 (메인에서 못 찾은 경우)
+            if not items:
+                for i, fr in enumerate(self.page.frames):
+                    try:
+                        frame_items = self._extract_reviews_from_frame(fr)
+                        if frame_items:
+                            items = frame_items
+                            print(f"[{self.CHANNEL_NAME}] 프레임[{i}] ({fr.url[:60]})에서 {len(items)}개 후보", flush=True)
+                            break
+                    except Exception as e:
+                        print(f"[{self.CHANNEL_NAME}] 프레임[{i}] 추출 오류: {e}", flush=True)
+                        continue
+
+            if not items:
+                print(f"[{self.CHANNEL_NAME}] 상품 {product_id} 페이지 {page_num}: 리뷰 없음", flush=True)
+                break
+
+            parsed_count = 0
+            for item in items:
+                try:
+                    content = (item.get("content") or "").strip()
+                    if not content or len(content) < 10:
+                        continue
+
+                    date_str = item.get("dateStr") or ""
+                    review_date = self._normalize_date(date_str) if date_str else datetime.now().strftime("%Y-%m-%d")
+
+                    try:
+                        rd = datetime.strptime(review_date, "%Y-%m-%d")
+                        if rd < cutoff_date:
+                            stop = True
+                            break
+                    except Exception:
+                        pass
+
+                    reviews.append({
+                        "channel": self.CHANNEL_NAME,
+                        "product_name": (item.get("productName") or "").strip() or f"상품#{product_id}",
+                        "option_name": "",
+                        "customer_id": "",
+                        "order_number": "",
+                        "rating": item.get("rating") or 5,
+                        "content": content,
+                        "review_date": review_date,
+                        "review_id_on_channel": (item.get("reviewId") or "").strip(),
+                    })
+                    parsed_count += 1
+                except Exception:
+                    continue
+
+            print(f"[{self.CHANNEL_NAME}] 상품 {product_id} 리뷰 페이지 {page_num}: {parsed_count}개 (후보 {len(items)}개)", flush=True)
+
+            if stop:
+                break
+
+            has_next = self.page.evaluate("""
+                () => {
+                    const btns = Array.from(document.querySelectorAll('button, a'));
+                    return btns.some(el => {
+                        const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                        return t === '다음' || t === '다음 페이지';
+                    });
+                }
+            """)
+            if not has_next:
+                break
+
+            try:
+                clicked = self.page.evaluate("""
+                    () => {
+                        const btns = Array.from(document.querySelectorAll('button, a'));
+                        const btn = btns.find(el => {
+                            const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+                            return t === '다음' || t === '다음 페이지';
+                        });
+                        if (btn) { btn.click(); return true; }
+                        return false;
+                    }
+                """)
+                if not clicked:
+                    break
+                self.sleep(1.5, 2.5)
+                page_num += 1
+            except Exception:
+                break
+
+            if page_num > 20:
+                break

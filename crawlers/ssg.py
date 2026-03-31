@@ -1,150 +1,92 @@
 """
-SSG 파트너오피스 크롤러
+SSG 크롤러 - 메디셜 브랜드샵
+공개 쇼핑몰 페이지 크롤링 (로그인 불필요)
 """
-import os
+from datetime import datetime, timedelta
 import re
-from datetime import datetime
 from .base import BaseCrawler
+
+# 리뷰 추출 공통 JS (ul/ol li + div 구조 모두 탐색)
+_REVIEW_EXTRACT_JS = """
+    () => {
+        const DATE_RE = /\\d{4}[.\\-\\/]\\d{1,2}[.\\-\\/]\\d{1,2}/;
+        const results = [];
+
+        const candidates = Array.from(document.querySelectorAll(
+            'ul > li, ol > li, ' +
+            '[class*="review_list"] > *, [class*="reviewList"] > *, ' +
+            '[class*="review-list"] > *, ' +
+            '[class*="cmt_list"] > *, ' +
+            '[class*="review"] li, [id*="review"] li, ' +
+            '[class*="review"] > div, [id*="review"] > div, ' +
+            '[class*="Review"] li, [class*="Review"] > div, ' +
+            '.review_list li, .ssg_review li'
+        ));
+
+        const seen = new Set();
+        for (const el of candidates) {
+            const fullText = (el.innerText || '').trim();
+            if (fullText.length < 15) continue;
+            if (!DATE_RE.test(fullText)) continue;
+            if (seen.has(fullText)) continue;
+            seen.add(fullText);
+
+            const dateMatch = fullText.match(/(\\d{4})[.\\-\\/](\\d{1,2})[.\\-\\/](\\d{1,2})/);
+            const dateStr = dateMatch ? dateMatch[1] + '.' + dateMatch[2] + '.' + dateMatch[3] : '';
+
+            let rating = 5;
+            const ratingEl = el.querySelector('[class*="rating"], [class*="star"], [class*="score"], [aria-label*="점"]');
+            if (ratingEl) {
+                const rl = ratingEl.getAttribute('aria-label') || ratingEl.getAttribute('title') || ratingEl.innerText || '';
+                const rm = rl.match(/(\\d+)/);
+                if (rm) rating = Math.min(5, Math.max(1, parseInt(rm[1])));
+                const style = ratingEl.getAttribute('style') || '';
+                const wm = style.match(/width:\\s*(\\d+(\\.\\d+)?)%/);
+                if (wm) rating = Math.round(parseFloat(wm[1]) / 20);
+            }
+
+            const lines = fullText.split('\\n').map(t => t.trim()).filter(t => t.length > 0);
+            let content = '';
+            for (const line of lines) {
+                if (DATE_RE.test(line)) continue;
+                if (/^[\\d,\\s]+$/.test(line)) continue;
+                if (line.length > content.length) content = line;
+            }
+            if (!content) content = fullText.substring(0, 500);
+            if (content.length < 10) continue;
+
+            const prdEl = el.querySelector('[class*="product"], [class*="goods_name"]');
+            const productName = prdEl ? (prdEl.innerText || '').trim().substring(0, 100) : '';
+            const optEl = el.querySelector('[class*="option"], [class*="opt"]');
+            const optionName = optEl ? (optEl.innerText || '').trim() : '';
+            const authorEl = el.querySelector('[class*="author"], [class*="user"], [class*="nick"]');
+            const customerId = authorEl ? (authorEl.innerText || '').trim() : '';
+            const reviewId = el.getAttribute('data-review-id') || el.id || '';
+
+            results.push({ content, dateStr, rating, productName, optionName, customerId, reviewId });
+        }
+        return results;
+    }
+"""
 
 
 class SSGCrawler(BaseCrawler):
     CHANNEL_NAME = "SSG"
-    LOGIN_URL = "https://po.ssgadm.com/authentication/login.ssg"
-    REVIEW_URL = "https://po.ssgadm.com/review/list.ssg"
-    CS_URL = "https://po.ssgadm.com/claim/claimList.ssg"
+    LOGIN_URL = ""
 
-    def __init__(self, headless: bool = True):
-        super().__init__(headless)
-        self.seller_id = os.getenv("SSG_ID", "")
-        self.seller_pw = os.getenv("SSG_PW", "")
+    BRAND_SHOP_URL = (
+        "https://www.ssg.com/disp/brandShop.ssg"
+        "?brandId=3000077368&ctgId=6000092907"
+    )
 
     def login(self) -> bool:
-        try:
-            self.page.goto(self.LOGIN_URL, wait_until="networkidle")
-            self.sleep(1.5, 2.5)
-
-            self.page.fill("input[name='userId'], #userId, input[type='text']", self.seller_id)
-            self.sleep(0.3, 0.5)
-            self.page.fill("input[name='userPwd'], #userPwd, input[type='password']", self.seller_pw)
-            self.sleep(0.3, 0.5)
-            self.page.click("button[type='submit'], .btn_login, button:has-text('로그인')")
-            self.sleep(3, 5)
-
-            return "po.ssgadm.com" in self.page.url and "login" not in self.page.url
-        except Exception as e:
-            print(f"[SSG] 로그인 오류: {e}")
-            return False
-
-    def collect_reviews(self, days_back: int = 7) -> list:
-        reviews = []
-        try:
-            self.page.goto(self.REVIEW_URL, wait_until="networkidle")
-            self.sleep(2, 3)
-
-            start_date, end_date = self.date_range(days_back)
-            date_inputs = self.page.query_selector_all("input[type='date'], .date-input")
-            if len(date_inputs) >= 2:
-                date_inputs[0].fill(start_date)
-                self.sleep(0.3, 0.5)
-                date_inputs[1].fill(end_date)
-                self.sleep(0.3, 0.5)
-
-            search_btn = self.page.query_selector("button:has-text('조회'), button:has-text('검색')")
-            if search_btn:
-                search_btn.click()
-                self.sleep(2, 3)
-
-            page_num = 1
-            while True:
-                rows = self.page.query_selector_all("table tbody tr, .review-item")
-                if not rows:
-                    break
-                for row in rows:
-                    data = self._parse_review_row(row)
-                    if data:
-                        reviews.append(data)
-
-                next_btn = self.page.query_selector(".pagination .next:not(.disabled)")
-                if not next_btn:
-                    break
-                next_btn.click()
-                self.sleep(1.5, 2.5)
-                page_num += 1
-                if page_num > 10:
-                    break
-        except Exception as e:
-            print(f"[SSG] 리뷰 수집 오류: {e}")
-        return reviews
-
-    def _parse_review_row(self, row) -> object:
-        try:
-            content_el = row.query_selector("[class*='review'], td:nth-child(5)")
-            content = content_el.inner_text().strip() if content_el else ""
-
-            rating_el = row.query_selector("[class*='rating'], [class*='star']")
-            rating_text = rating_el.inner_text() if rating_el else "0"
-            rating = int(re.search(r'\d', rating_text).group()) if re.search(r'\d', rating_text) else 0
-
-            product_el = row.query_selector("[class*='product'], td:nth-child(2)")
-            product_name = product_el.inner_text().strip() if product_el else ""
-
-            date_el = row.query_selector("[class*='date'], td:last-child")
-            review_date = date_el.inner_text().strip() if date_el else datetime.now().strftime("%Y-%m-%d")
-            review_date = self._normalize_date(review_date)
-
-            if not content:
-                return None
-
-            return {
-                "channel": self.CHANNEL_NAME,
-                "product_name": product_name,
-                "option_name": "",
-                "customer_id": "",
-                "order_number": "",
-                "rating": rating,
-                "content": content,
-                "review_date": review_date,
-                "review_id_on_channel": "",
-            }
-        except Exception:
-            return None
+        return True
 
     def collect_cs(self, days_back: int = 7) -> list:
-        items = []
-        try:
-            self.page.goto(self.CS_URL, wait_until="networkidle")
-            self.sleep(2, 3)
-
-            rows = self.page.query_selector_all("table tbody tr")
-            for row in rows:
-                try:
-                    title_el = row.query_selector("td:nth-child(4), [class*='title']")
-                    title = title_el.inner_text().strip() if title_el else ""
-
-                    date_el = row.query_selector("td:last-child, [class*='date']")
-                    inquiry_date = date_el.inner_text().strip() if date_el else datetime.now().strftime("%Y-%m-%d")
-                    inquiry_date = self._normalize_date(inquiry_date)
-
-                    if not title:
-                        continue
-
-                    items.append({
-                        "channel": self.CHANNEL_NAME,
-                        "product_name": "",
-                        "customer_id": "",
-                        "title": title,
-                        "content": title,
-                        "inquiry_date": inquiry_date,
-                        "item_id": f"ssg_{inquiry_date}_{len(items)}",
-                    })
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[SSG] CS 수집 오류: {e}")
-        return items
+        return []
 
     def post_review_reply(self, review_id_on_channel: str, reply_text: str) -> bool:
-        return False  # 추후 구현
+        return False
 
     def post_cs_reply(self, cs_id_on_channel: str, reply_text: str) -> bool:
         return False
@@ -154,4 +96,222 @@ class SSGCrawler(BaseCrawler):
         m = re.search(r'(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})', date_str)
         if m:
             return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+        m2 = re.search(r'(\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})', date_str)
+        if m2:
+            year = int(m2.group(1))
+            year = 2000 + year if year < 100 else year
+            return f"{year}-{int(m2.group(2)):02d}-{int(m2.group(3)):02d}"
         return datetime.now().strftime("%Y-%m-%d")
+
+    def collect_reviews(self, days_back: int = 7) -> list:
+        reviews = []
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+
+        print(f"[{self.CHANNEL_NAME}] 브랜드샵 상품 목록 수집 시작", flush=True)
+        item_ids = self._get_item_ids()
+        print(f"[{self.CHANNEL_NAME}] 상품 {len(item_ids)}개 발견", flush=True)
+
+        for item_id in item_ids:
+            self._collect_item_reviews(item_id, reviews, days_back, cutoff_date)
+            self.sleep(1.5, 2.5)
+
+        print(f"[{self.CHANNEL_NAME}] 총 {len(reviews)}개 리뷰 수집 완료", flush=True)
+        return reviews
+
+    def _get_item_ids(self) -> list:
+        seen = set()
+        item_ids = []
+        page_num = 1
+
+        while True:
+            url = f"{self.BRAND_SHOP_URL}&page={page_num}"
+            print(f"[{self.CHANNEL_NAME}] 브랜드샵 페이지 {page_num}: {url}", flush=True)
+
+            try:
+                self.page.goto(url, wait_until="networkidle", timeout=20000)
+                self.sleep(1.5, 2.5)
+            except Exception as e:
+                print(f"[{self.CHANNEL_NAME}] 브랜드샵 페이지 로드 실패: {e}", flush=True)
+                break
+
+            print(f"[{self.CHANNEL_NAME}] 페이지 타이틀: {self.page.title()}", flush=True)
+
+            ids = self.page.evaluate("""
+                () => {
+                    const ids = [];
+                    const seen = new Set();
+                    Array.from(document.querySelectorAll('a')).forEach(a => {
+                        const href = a.href || '';
+                        const m = href.match(/itemId=(\\d+)/);
+                        if (m && !seen.has(m[1])) {
+                            seen.add(m[1]);
+                            ids.push(m[1]);
+                        }
+                    });
+                    return ids;
+                }
+            """)
+            print(f"[{self.CHANNEL_NAME}] 페이지 {page_num} 상품 {len(ids)}개 발견", flush=True)
+
+            if not ids:
+                break
+
+            new_found = False
+            for iid in ids:
+                if iid not in seen:
+                    seen.add(iid)
+                    item_ids.append(iid)
+                    new_found = True
+
+            if not new_found:
+                break
+
+            page_num += 1
+            self.sleep(1.0, 2.0)
+
+        return item_ids
+
+    def _collect_item_reviews(self, item_id: str, reviews: list, days_back: int, cutoff_date: datetime):
+        url = f"https://www.ssg.com/item/itm_detail.ssg?itemId={item_id}"
+        print(f"[{self.CHANNEL_NAME}] 상품 {item_id} 리뷰 수집: {url}", flush=True)
+
+        try:
+            self.page.goto(url, wait_until="networkidle", timeout=20000)
+            self.sleep(1.5, 2.5)
+        except Exception as e:
+            print(f"[{self.CHANNEL_NAME}] 상품 {item_id} 로드 실패: {e}", flush=True)
+            return
+
+        # 구매후기 탭 클릭 - Playwright 셀렉터
+        tab_clicked = False
+        for tab_sel in [
+            "a:has-text('구매후기')",
+            "button:has-text('구매후기')",
+            "a:has-text('리뷰')",
+            "li:has-text('구매후기') > a",
+            "[data-tab='review']",
+            "#reviewTab",
+            "[href*='review']",
+        ]:
+            try:
+                tab = self.page.query_selector(tab_sel)
+                if tab and tab.is_visible():
+                    tab.click()
+                    self.sleep(2.0, 3.0)
+                    tab_clicked = True
+                    print(f"[{self.CHANNEL_NAME}] 구매후기 탭 클릭 성공: {tab_sel}", flush=True)
+                    break
+            except Exception:
+                continue
+
+        if not tab_clicked:
+            # JS로 탭 클릭 시도 (텍스트 기반)
+            js_clicked = self.page.evaluate("""
+                () => {
+                    const els = Array.from(document.querySelectorAll('a, button, li'));
+                    const el = els.find(e => {
+                        const t = (e.innerText || '').trim();
+                        return t.includes('구매후기') || t.includes('리뷰');
+                    });
+                    if (el) {
+                        el.click();
+                        return el.innerText.trim();
+                    }
+                    return null;
+                }
+            """)
+            if js_clicked:
+                print(f"[{self.CHANNEL_NAME}] JS 탭 클릭 성공: '{js_clicked}'", flush=True)
+                self.sleep(2.0, 3.0)
+                tab_clicked = True
+            else:
+                print(f"[{self.CHANNEL_NAME}] 상품 {item_id}: 구매후기 탭 찾기 실패", flush=True)
+                # 탭 없어도 스크롤해서 리뷰 섹션 찾기 시도
+                self.page.evaluate("""
+                    () => {
+                        const el = document.querySelector('.review_list, [id*="review"], [class*="review"]');
+                        if (el) el.scrollIntoView();
+                    }
+                """)
+                self.sleep(1.0, 2.0)
+
+        page_num = 1
+        stop = False
+
+        while not stop:
+            items = self.page.evaluate(_REVIEW_EXTRACT_JS)
+
+            if not items:
+                print(f"[{self.CHANNEL_NAME}] 상품 {item_id} 페이지 {page_num}: 리뷰 없음", flush=True)
+                break
+
+            parsed_count = 0
+            for item in items:
+                try:
+                    content = (item.get("content") or "").strip()
+                    if not content or len(content) < 10:
+                        continue
+
+                    date_str = item.get("dateStr") or ""
+                    review_date = self._normalize_date(date_str) if date_str else datetime.now().strftime("%Y-%m-%d")
+
+                    try:
+                        rd = datetime.strptime(review_date, "%Y-%m-%d")
+                        if rd < cutoff_date:
+                            stop = True
+                            break
+                    except Exception:
+                        pass
+
+                    reviews.append({
+                        "channel": self.CHANNEL_NAME,
+                        "product_name": (item.get("productName") or "").strip() or f"상품#{item_id}",
+                        "option_name": (item.get("optionName") or "").strip(),
+                        "customer_id": (item.get("customerId") or "").strip(),
+                        "order_number": "",
+                        "rating": item.get("rating") or 5,
+                        "content": content,
+                        "review_date": review_date,
+                        "review_id_on_channel": (item.get("reviewId") or "").strip(),
+                    })
+                    parsed_count += 1
+                except Exception:
+                    continue
+
+            print(f"[{self.CHANNEL_NAME}] 상품 {item_id} 리뷰 페이지 {page_num}: {parsed_count}개 (후보 {len(items)}개)", flush=True)
+
+            if stop:
+                break
+
+            # 다음 페이지 버튼 (JS)
+            has_next = self.page.evaluate("""
+                () => {
+                    const els = Array.from(document.querySelectorAll('.pagination a, .paging a, a, button'));
+                    return els.some(el => {
+                        const t = (el.innerText || '').trim();
+                        const cls = el.className || '';
+                        return t === '다음' || (cls.includes('next') && !cls.includes('disabled'));
+                    });
+                }
+            """)
+            if not has_next:
+                break
+
+            try:
+                clicked = self.page.evaluate("""
+                    () => {
+                        const els = Array.from(document.querySelectorAll('.pagination a, .paging a, a, button'));
+                        const el = els.find(e => (e.innerText || '').trim() === '다음');
+                        if (el) { el.click(); return true; }
+                        return false;
+                    }
+                """)
+                if not clicked:
+                    break
+                self.sleep(1.5, 2.5)
+                page_num += 1
+            except Exception:
+                break
+
+            if page_num > 20:
+                break

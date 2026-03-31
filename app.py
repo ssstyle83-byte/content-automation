@@ -552,6 +552,42 @@ with tab8:
     st.subheader("🔄 채널 데이터 수집")
     st.info("선택한 채널의 리뷰와 CS 문의를 자동으로 수집합니다. .env 파일에 각 채널 계정 정보를 입력해야 합니다.")
 
+    # ── 로그인 세션 관리 ──────────────────────────────
+    with st.expander("🔑 로그인 세션 관리 (수동 로그인 필요 채널)", expanded=True):
+        st.markdown(
+            "일부 채널(네이버 스마트스토어 등)은 보안 정책으로 자동 로그인이 차단됩니다. "
+            "**수동 로그인** 버튼을 누르면 브라우저 창이 열리고, 직접 로그인(2차 인증 포함)하면 "
+            "세션이 저장되어 이후 자동 수집 시 재사용됩니다."
+        )
+        sess_cols = st.columns(len(CRAWLERS))
+        for i, (ch_name, crawler_cls) in enumerate(CRAWLERS.items()):
+            with sess_cols[i]:
+                needs_login = bool(crawler_cls.LOGIN_URL)
+                if not needs_login:
+                    st.markdown(f"**{ch_name}**  \n🟢 로그인 불필요")
+                    st.caption("공개 페이지 수집")
+                else:
+                    has_session = crawler_cls.session_exists()
+                    status_icon = "🟢" if has_session else "🔴"
+                    st.markdown(f"**{ch_name}**  \n{status_icon} {'세션 있음' if has_session else '세션 없음'}")
+                    if st.button(f"수동 로그인", key=f"login_{ch_name}", use_container_width=True):
+                        with st.spinner(f"{ch_name} 브라우저를 열고 있습니다. 로그인 완료 후 자동으로 저장됩니다..."):
+                            try:
+                                success = crawler_cls.manual_login_and_save()
+                                if success:
+                                    st.success(f"✅ {ch_name} 세션 저장 완료!")
+                                else:
+                                    st.error(f"❌ {ch_name} 로그인 시간 초과 또는 실패")
+                            except Exception as e:
+                                st.error(f"로그인 오류: {e}")
+                    if has_session:
+                        if st.button(f"세션 삭제", key=f"del_sess_{ch_name}", use_container_width=True,
+                                     type="secondary"):
+                            crawler_cls.delete_session()
+                            st.info(f"{ch_name} 세션이 삭제되었습니다.")
+                            st.rerun()
+    st.divider()
+
     col_left, col_right = st.columns([1, 1])
     with col_left:
         st.markdown("#### 수집 설정")
@@ -614,6 +650,8 @@ with tab8:
                     st.error(f"[{channel}] 수집 오류: {e}")
                 progress.progress((ch_idx + 1) / len(selected_channels))
             status_text.text("수집 완료!")
+            if st.button("📊 대시보드에서 결과 보기", type="primary"):
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════

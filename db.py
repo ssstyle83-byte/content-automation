@@ -29,24 +29,25 @@ def init_db():
     with get_conn() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS reviews (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel       TEXT NOT NULL,
-            product_name  TEXT,
-            option_name   TEXT,
-            customer_id   TEXT,
-            order_number  TEXT,
-            rating        INTEGER,
-            content       TEXT,
-            review_date   TEXT,
-            collected_at  TEXT DEFAULT (datetime('now','localtime')),
-            sentiment     TEXT DEFAULT 'neutral',
-            issue_tags    TEXT DEFAULT '[]',
-            is_risk       INTEGER DEFAULT 0,
-            risk_reason   TEXT,
-            reply_draft   TEXT,
-            reply_status  TEXT DEFAULT 'pending',
-            reply_posted_at TEXT,
-            UNIQUE(channel, order_number, review_date)
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel               TEXT NOT NULL,
+            product_name          TEXT,
+            option_name           TEXT,
+            customer_id           TEXT,
+            order_number          TEXT,
+            rating                INTEGER,
+            content               TEXT,
+            review_date           TEXT,
+            review_id_on_channel  TEXT,
+            collected_at          TEXT DEFAULT (datetime('now','localtime')),
+            sentiment             TEXT DEFAULT 'neutral',
+            issue_tags            TEXT DEFAULT '[]',
+            is_risk               INTEGER DEFAULT 0,
+            risk_reason           TEXT,
+            reply_draft           TEXT,
+            reply_status          TEXT DEFAULT 'pending',
+            reply_posted_at       TEXT,
+            UNIQUE(channel, review_date, content)
         );
 
         CREATE TABLE IF NOT EXISTS cs_items (
@@ -83,15 +84,15 @@ def init_db():
 
 # ── reviews ────────────────────────────────────────
 
-def upsert_review(data: dict) -> int:
-    """리뷰 저장 (중복 시 무시). 저장된 id 반환."""
+def upsert_review(data: dict) -> bool:
+    """리뷰 저장 (중복 시 무시). 신규 저장 시 True 반환."""
     cols = [
         "channel", "product_name", "option_name", "customer_id",
         "order_number", "rating", "content", "review_date",
-        "sentiment", "issue_tags", "is_risk", "risk_reason",
-        "reply_draft", "reply_status"
+        "review_id_on_channel", "sentiment", "issue_tags", "is_risk",
+        "risk_reason", "reply_draft", "reply_status"
     ]
-    vals = [data.get(c) for c in cols]
+    vals = [data.get(c) if c != "reply_status" else (data.get(c) or "pending") for c in cols]
     placeholders = ", ".join(["?"] * len(cols))
     col_str = ", ".join(cols)
     with get_conn() as conn:
@@ -99,14 +100,7 @@ def upsert_review(data: dict) -> int:
             f"INSERT OR IGNORE INTO reviews ({col_str}) VALUES ({placeholders})",
             vals
         )
-        if cur.lastrowid:
-            return cur.lastrowid
-        # 이미 존재하면 id 조회
-        row = conn.execute(
-            "SELECT id FROM reviews WHERE channel=? AND order_number=? AND review_date=?",
-            (data.get("channel"), data.get("order_number"), data.get("review_date"))
-        ).fetchone()
-        return row["id"] if row else None
+        return cur.rowcount > 0
 
 
 def update_review_analysis(review_id: int, sentiment: str, issue_tags: list,

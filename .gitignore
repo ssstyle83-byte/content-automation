@@ -8,3 +8,4 @@ review_data.db
 review_scheduler.log
 review_schedule_config.json
 captures/
+sessions/
