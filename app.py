@@ -4,7 +4,9 @@ import json
 import os
 import re
 from datetime import datetime, time as dtime
+from pathlib import Path
 from dotenv import load_dotenv
+
 from blog_capture import capture_blog
 from competitor_ui import render_competitor_tab
 import db
@@ -16,16 +18,20 @@ from crawlers import CRAWLERS
 load_dotenv()
 
 # ── 기본 설정 ──────────────────────────────────────
-PROMPTS_FILE  = "prompts.json"
+PROMPTS_FILE = "prompts.json"
 PRODUCTS_FILE = "products.json"
-OUTPUTS_DIR   = "outputs"
+OUTPUTS_DIR = "outputs"
 SCHEDULE_FILE = "schedule_config.json"
-CAPTURES_DIR  = "captures"
+CAPTURES_DIR = "captures"
+COLLECTION_EXPORT_DIR = Path("collected_data")
+
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
 os.makedirs(CAPTURES_DIR, exist_ok=True)
+COLLECTION_EXPORT_DIR.mkdir(exist_ok=True)
 
 st.set_page_config(page_title="원고 출력 자동화", page_icon="✍️", layout="wide")
 st.title("✍️ 원고 출력 자동화")
+
 
 # ── 유틸 함수 ──────────────────────────────────────
 def load_prompts():
@@ -40,9 +46,11 @@ def load_prompts():
             return {}
     return {}
 
+
 def save_prompts(prompts):
     with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
         json.dump(prompts, f, ensure_ascii=False, indent=2)
+
 
 def load_products():
     if os.path.exists(PRODUCTS_FILE):
@@ -53,9 +61,11 @@ def load_products():
             return []
     return []
 
+
 def save_products(products):
     with open(PRODUCTS_FILE, "w", encoding="utf-8") as f:
         json.dump(products, f, ensure_ascii=False, indent=2)
+
 
 def get_client():
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -69,8 +79,10 @@ def get_client():
         return None
     return anthropic.Anthropic(api_key=api_key)
 
+
 def count_keyword(text, keyword):
     return len(re.findall(re.escape(keyword), text, re.IGNORECASE))
+
 
 def generate_content(prompt_template, keyword, model):
     client = get_client()
@@ -80,9 +92,10 @@ def generate_content(prompt_template, keyword, model):
     msg = client.messages.create(
         model=model,
         max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
     )
     return msg.content[0].text
+
 
 def verify_content(content, keyword):
     client = get_client()
@@ -105,15 +118,16 @@ def verify_content(content, keyword):
     msg = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=800,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
     )
     try:
-        match = re.search(r'\{.*\}', msg.content[0].text, re.DOTALL)
+        match = re.search(r"\{.*\}", msg.content[0].text, re.DOTALL)
         if match:
             return json.loads(match.group())
     except Exception:
         pass
     return None
+
 
 def save_output(keyword, content):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -122,23 +136,107 @@ def save_output(keyword, content):
         f.write(content)
     return filename
 
+
+def export_collection_snapshot(channel: str, reviews: list, cs_items: list):
+    date_dir = COLLECTION_EXPORT_DIR / datetime.now().strftime("%Y-%m-%d")
+    date_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%H%M%S")
+    payload = {
+        "channel": channel,
+        "collected_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reviews": reviews,
+        "cs": cs_items,
+    }
+
+    path = date_dir / f"{channel}_{stamp}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return str(path)
+
+
+def reset_reply_management_data(target_channel=None):
+    if hasattr(db, "reset_reply_data"):
+        db.reset_reply_data(channel=target_channel)
+        return
+
+    # db.py에 reset_reply_data가 아직 없을 경우 대비한 안전장치
+    if target_channel:
+        if hasattr(db, "delete_reviews"):
+            db.delete_reviews(channel=target_channel)
+        if hasattr(db, "delete_cs_items"):
+            db.delete_cs_items(channel=target_channel)
+    else:
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM reviews")
+            conn.execute("DELETE FROM cs_items")
+
+
+def get_collection_date_options(table_name: str):
+    if hasattr(db, "get_collection_dates"):
+        return db.get_collection_dates(table_name)
+
+    # db.py 함수가 아직 없을 경우 대비한 fallback
+    if table_name not in {"reviews", "cs_items"}:
+        return []
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT substr(collected_at, 1, 10) AS d FROM {table_name} ORDER BY d DESC"
+        ).fetchall()
+    return [r["d"] for r in rows if r["d"]]
+
+
+def get_reviews_filtered(channel=None, status=None, date_from=None, date_to=None, collected_date=None, limit=200):
+    if hasattr(db, "get_reviews"):
+        try:
+            return db.get_reviews(
+                channel=channel,
+                status=status,
+                date_from=date_from,
+                date_to=date_to,
+                collected_date=collected_date,
+                limit=limit,
+            )
+        except TypeError:
+            # 구버전 시그니처 대응
+            return db.get_reviews(channel=channel, status=status, date_from=date_from, date_to=date_to, limit=limit)
+    return []
+
+
+def get_cs_filtered(channel=None, status=None, collected_date=None, limit=200):
+    if hasattr(db, "get_cs_items"):
+        try:
+            return db.get_cs_items(
+                channel=channel,
+                status=status,
+                collected_date=collected_date,
+                limit=limit,
+            )
+        except TypeError:
+            return db.get_cs_items(channel=channel, status=status, limit=limit)
+    return []
+
+
 # ── session state 초기화 ───────────────────────────
 if "results" not in st.session_state:
     st.session_state.results = []
 
+
 # ── 탭 구성 ───────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
-    "📝 원고 생성",
-    "📋 프롬프트 관리",
-    "⏰ 예약 실행",
-    "📸 블로그 캡처",
-    "🔍 경쟁사 분석",
-    "⚙️ 설정",
-    "📊 CS/리뷰 대시보드",
-    "🔄 데이터 수집",
-    "💬 답변 관리",
-    "🏷️ 분석 리포트",
-])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
+    [
+        "📝 원고 생성",
+        "📋 프롬프트 관리",
+        "⏰ 예약 실행",
+        "📸 블로그 캡처",
+        "🔍 경쟁사 분석",
+        "⚙️ 설정",
+        "📊 CS/리뷰 대시보드",
+        "🔄 데이터 수집",
+        "💬 답변 관리",
+        "🏷️ 분석 리포트",
+    ]
+)
 
 
 # ══════════════════════════════════════════════════
@@ -157,12 +255,15 @@ with tab1:
             keywords_input = st.text_area(
                 "키워드 입력 (줄바꿈으로 여러 개 가능)",
                 height=140,
-                placeholder="혈압관리\n당뇨식단\n체중감량"
+                placeholder="혈압관리\n당뇨식단\n체중감량",
             )
-            model = st.selectbox("모델", [
-                "claude-sonnet-4-5-20250929",
-                "claude-haiku-4-5-20251001"
-            ])
+            model = st.selectbox(
+                "모델",
+                [
+                    "claude-sonnet-4-5-20250929",
+                    "claude-haiku-4-5-20251001",
+                ],
+            )
             do_verify = st.checkbox("신뢰도 검증 포함", value=True)
             run_btn = st.button("🚀 원고 생성", type="primary", use_container_width=True)
 
@@ -191,7 +292,7 @@ with tab1:
                             "kw_count": count_keyword(content, kw),
                             "file": filename,
                             "time": datetime.now().strftime("%H:%M:%S"),
-                            "verification": None
+                            "verification": None,
                         }
                         if do_verify:
                             with st.spinner(f"'{kw}' 신뢰도 검증 중..."):
@@ -211,7 +312,7 @@ with tab1:
                     m1, m2, m3 = st.columns(3)
                     m1.metric("글자 수", f"{r['chars']:,}자")
                     m2.metric("키워드 반복", f"{r['kw_count']}회")
-                    m3.metric("생성 시간", r['time'])
+                    m3.metric("생성 시간", r["time"])
 
                     v = r.get("verification")
                     if v:
@@ -219,8 +320,8 @@ with tab1:
                         color = "🟢" if score >= 80 else "🟡" if score >= 60 else "🔴"
                         st.info(
                             f"{color} **신뢰도 {score}점**  "
-                            f"|  사실정확도: {v.get('factual_accuracy','')}  "
-                            f"|  키워드: {v.get('keyword_natural','')}"
+                            f"|  사실정확도: {v.get('factual_accuracy', '')}  "
+                            f"|  키워드: {v.get('keyword_natural', '')}"
                         )
                         if v.get("issues"):
                             st.warning("⚠️ 문제점: " + "  /  ".join(v["issues"]))
@@ -244,7 +345,7 @@ with tab2:
         new_body = st.text_area(
             "프롬프트 내용  (키워드 위치는 {keyword} 로 표시)",
             height=260,
-            placeholder="{keyword}에 대한 블로그 원고를 작성해주세요.\n\n요구사항:\n- 글자 수: 2000자 이상\n- 어조: 친근하고 전문적\n- 소제목 3개 이상 포함"
+            placeholder="{keyword}에 대한 블로그 원고를 작성해주세요.\n\n요구사항:\n- 글자 수: 2000자 이상\n- 어조: 친근하고 전문적\n- 소제목 3개 이상 포함",
         )
         if st.button("➕ 추가", type="primary", use_container_width=True):
             if new_name and new_body:
@@ -286,15 +387,18 @@ with tab3:
 
     with col_a:
         st.subheader("예약 설정")
-        sch_prompt   = st.selectbox("프롬프트", list(prompts.keys()) if prompts else ["없음"])
+        sch_prompt = st.selectbox("프롬프트", list(prompts.keys()) if prompts else ["없음"])
         sch_keywords = st.text_area("키워드 목록", height=150, placeholder="키워드1\n키워드2\n키워드3")
-        sch_time     = st.time_input("실행 시간", value=dtime(9, 0))
-        sch_hour     = sch_time.hour
-        sch_minute   = sch_time.minute
-        sch_model    = st.selectbox("모델 ", [
-            "claude-sonnet-4-5-20250929",
-            "claude-haiku-4-5-20251001"
-        ])
+        sch_time = st.time_input("실행 시간", value=dtime(9, 0))
+        sch_hour = sch_time.hour
+        sch_minute = sch_time.minute
+        sch_model = st.selectbox(
+            "모델 ",
+            [
+                "claude-sonnet-4-5-20250929",
+                "claude-haiku-4-5-20251001",
+            ],
+        )
 
         c1, c2 = st.columns(2)
         if c1.button("⏰ 예약 등록", type="primary", use_container_width=True):
@@ -305,7 +409,7 @@ with tab3:
                     "hour": sch_hour,
                     "minute": sch_minute,
                     "model": sch_model,
-                    "active": True
+                    "active": True,
                 }
                 with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -328,9 +432,9 @@ with tab3:
             st.write(f"**프롬프트:** {cfg['prompt_name']}")
             st.write(f"**실행 시간:** {cfg['hour']:02d}:{cfg['minute']:02d}")
             st.write(f"**모델:** {cfg['model']}")
-            kws = cfg['keywords'].splitlines()
+            kws = cfg["keywords"].splitlines()
             st.write(f"**키워드 수:** {len(kws)}개")
-            st.text_area("키워드 목록", value=cfg['keywords'], height=150, disabled=True)
+            st.text_area("키워드 목록", value=cfg["keywords"], height=150, disabled=True)
         else:
             st.warning("🔴 등록된 예약 없음")
 
@@ -384,7 +488,7 @@ with tab4:
             urls_input = st.text_area(
                 "블로그 링크 입력 (줄바꿈으로 여러 개)",
                 height=180,
-                placeholder="https://blog.naver.com/xxx/111\nhttps://blog.naver.com/xxx/222"
+                placeholder="https://blog.naver.com/xxx/111\nhttps://blog.naver.com/xxx/222",
             )
 
             if st.button("📸 캡처 시작", type="primary", use_container_width=True):
@@ -457,8 +561,11 @@ with tab6:
                 with open(".env", "r") as f:
                     existing = f.read()
             with open(".env", "w") as f:
-                lines = [l for l in existing.splitlines()
-                         if not l.startswith("NAVER_CLIENT_ID") and not l.startswith("NAVER_CLIENT_SECRET")]
+                lines = [
+                    l
+                    for l in existing.splitlines()
+                    if not l.startswith("NAVER_CLIENT_ID") and not l.startswith("NAVER_CLIENT_SECRET")
+                ]
                 lines += [f"NAVER_CLIENT_ID={n1}", f"NAVER_CLIENT_SECRET={n2}"]
                 f.write("\n".join(lines) + "\n")
             os.environ["NAVER_CLIENT_ID"] = n1
@@ -485,21 +592,21 @@ with tab6:
 with tab7:
     st.subheader("📊 CS/리뷰 현황 대시보드")
 
-    # 미해결 알림 배너
     alerts = db.get_unresolved_alerts()
     if alerts:
         for a in [x for x in alerts if x["level"] == "critical"][:3]:
             col_al, col_btn = st.columns([8, 1])
             col_al.error(f"🚨 **[긴급]** {a['message']}")
             if col_btn.button("해결", key=f"resolve_{a['id']}"):
-                db.resolve_alert(a["id"]); st.rerun()
+                db.resolve_alert(a["id"])
+                st.rerun()
         for a in [x for x in alerts if x["level"] == "warning"][:3]:
             col_al, col_btn = st.columns([8, 1])
             col_al.warning(f"⚠️ {a['message']}")
             if col_btn.button("해결", key=f"resolve_{a['id']}"):
-                db.resolve_alert(a["id"]); st.rerun()
+                db.resolve_alert(a["id"])
+                st.rerun()
 
-    # 채널별 통계 카드
     stats = db.get_review_stats()
     if stats:
         st.markdown("#### 채널별 리뷰 현황")
@@ -508,20 +615,23 @@ with tab7:
             with cols[i % 3]:
                 avg_r = s.get("avg_rating") or 0
                 neg_rate = round(100 * s.get("neg_count", 0) / max(s.get("total", 1), 1), 1)
-                st.metric(label=channel, value=f"총 {s.get('total', 0)}건",
-                          delta=f"미답변 {s.get('pending_count', 0)}건")
+                st.metric(
+                    label=channel,
+                    value=f"총 {s.get('total', 0)}건",
+                    delta=f"미답변 {s.get('pending_count', 0)}건",
+                )
                 st.caption(f"평균 평점 {avg_r:.1f}점 | 부정 {neg_rate}% | 위험 {s.get('risk_count', 0)}건")
     else:
         st.info("수집된 리뷰 데이터가 없습니다. [데이터 수집] 탭에서 수집을 시작하세요.")
 
     st.divider()
 
-    # 상품별 클레임율 테이블
     st.markdown("#### 상품별 클레임율 (부정 리뷰 비율)")
     claim_data = db.get_claim_rates()
     if claim_data:
         try:
             import pandas as pd
+
             df = pd.DataFrame(claim_data)
             df.columns = ["상품명", "옵션", "채널", "총 리뷰", "부정 리뷰", "클레임율(%)"]
             st.dataframe(df, use_container_width=True, hide_index=True)
@@ -535,14 +645,20 @@ with tab7:
     col_r, col_c = st.columns(2)
     with col_r:
         st.markdown("#### 미답변 리뷰")
-        st.metric("자동 등록 대기", f"{len(db.get_reviews(status='pending', limit=500))}건")
-        st.metric("검토 필요 (위험)", f"{len(db.get_reviews(status='review_needed', limit=500))}건",
-                  delta_color="inverse")
+        st.metric("자동 등록 대기", f"{len(get_reviews_filtered(status='pending', limit=500))}건")
+        st.metric(
+            "검토 필요 (위험)",
+            f"{len(get_reviews_filtered(status='review_needed', limit=500))}건",
+            delta_color="inverse",
+        )
     with col_c:
         st.markdown("#### 미답변 CS")
-        st.metric("자동 등록 대기", f"{len(db.get_cs_items(status='pending', limit=500))}건")
-        st.metric("검토 필요 (위험)", f"{len(db.get_cs_items(status='review_needed', limit=500))}건",
-                  delta_color="inverse")
+        st.metric("자동 등록 대기", f"{len(get_cs_filtered(status='pending', limit=500))}건")
+        st.metric(
+            "검토 필요 (위험)",
+            f"{len(get_cs_filtered(status='review_needed', limit=500))}건",
+            delta_color="inverse",
+        )
 
 
 # ══════════════════════════════════════════════════
@@ -552,7 +668,6 @@ with tab8:
     st.subheader("🔄 채널 데이터 수집")
     st.info("선택한 채널의 리뷰와 CS 문의를 자동으로 수집합니다. .env 파일에 각 채널 계정 정보를 입력해야 합니다.")
 
-    # ── 로그인 세션 관리 ──────────────────────────────
     with st.expander("🔑 로그인 세션 관리 (수동 로그인 필요 채널)", expanded=True):
         st.markdown(
             "일부 채널(네이버 스마트스토어 등)은 보안 정책으로 자동 로그인이 차단됩니다. "
@@ -581,8 +696,12 @@ with tab8:
                             except Exception as e:
                                 st.error(f"로그인 오류: {e}")
                     if has_session:
-                        if st.button(f"세션 삭제", key=f"del_sess_{ch_name}", use_container_width=True,
-                                     type="secondary"):
+                        if st.button(
+                            f"세션 삭제",
+                            key=f"del_sess_{ch_name}",
+                            use_container_width=True,
+                            type="secondary",
+                        ):
                             crawler_cls.delete_session()
                             st.info(f"{ch_name} 세션이 삭제되었습니다.")
                             st.rerun()
@@ -591,18 +710,31 @@ with tab8:
     col_left, col_right = st.columns([1, 1])
     with col_left:
         st.markdown("#### 수집 설정")
-        selected_channels = st.multiselect("수집할 채널 선택", list(CRAWLERS.keys()),
-                                           default=["스마트스토어"])
-        period = st.selectbox("수집 기간", ["오늘 (1일)", "최근 7일", "최근 30일", "최근 90일"])
+        default_channels = [ch for ch in ["카페24", "스마트스토어"] if ch in CRAWLERS]
+        if not default_channels:
+            default_channels = list(CRAWLERS.keys())[:1]
+
+        selected_channels = st.multiselect(
+            "수집할 채널 선택",
+            list(CRAWLERS.keys()),
+            default=default_channels,
+        )
+        period = st.selectbox("수집 기간", ["오늘 (1일)", "최근 7일", "최근 30일", "최근 90일"], index=1)
         days_back = {"오늘 (1일)": 1, "최근 7일": 7, "최근 30일": 30, "최근 90일": 90}[period]
         do_analyze = st.checkbox("수집 후 자동 분석 (감정/이슈 태깅)", value=True)
         do_generate_reply = st.checkbox("분석 후 자동 답변 생성", value=True)
         do_auto_post = st.checkbox("답변 자동 등록 (위험 항목 제외)", value=False)
         headless_mode = st.checkbox("백그라운드 실행 (창 숨김)", value=True)
+        do_reset = st.checkbox(
+            "🗑️ 수집 전 기존 데이터 초기화 (선택 채널 전체 삭제 후 새로 저장)",
+            value=False,
+            help="이전 수집 데이터를 모두 지우고 이번 수집 결과로 대체합니다.",
+        )
         run_btn = st.button("🚀 수집 시작", type="primary", use_container_width=True)
 
     with col_right:
         st.markdown("#### 수집 결과")
+        st.caption("수집 후 채널별 JSON 스냅샷이 collected_data/YYYY-MM-DD/ 에 저장됩니다.")
 
     if run_btn:
         if not selected_channels:
@@ -610,24 +742,47 @@ with tab8:
         else:
             progress = st.progress(0)
             status_text = st.empty()
+
             for ch_idx, channel in enumerate(selected_channels):
                 status_text.text(f"[{ch_idx+1}/{len(selected_channels)}] {channel} 수집 중...")
                 try:
+                    if do_reset:
+                        reset_reply_management_data(target_channel=channel)
+                        st.info(f"🗑️ [{channel}] 기존 답변 관리 데이터 초기화 완료")
+
                     crawler = CRAWLERS[channel](headless=headless_mode)
                     result = crawler.run_collect(days_back=days_back)
+
                     if result.get("error"):
                         st.error(f"[{channel}] {result['error']}")
                     else:
-                        new_reviews = sum(1 for rv in result.get("reviews", []) if db.upsert_review(rv))
-                        new_cs = sum(1 for cs in result.get("cs", []) if db.upsert_cs(cs))
-                        st.success(f"✅ [{channel}] 리뷰 {new_reviews}건, CS {new_cs}건 수집 완료")
+                        collected_reviews = result.get("reviews", [])
+                        collected_cs = result.get("cs", [])
 
-                        if do_analyze and new_reviews > 0:
+                        upsert_results = [db.upsert_review(rv) for rv in collected_reviews]
+                        new_reviews = sum(upsert_results)
+                        new_cs = sum(1 for cs in collected_cs if db.upsert_cs(cs))
+
+                        total_r = len(collected_reviews)
+                        total_cs = len(collected_cs)
+
+                        exported_path = export_collection_snapshot(channel, collected_reviews, collected_cs)
+
+                        review_msg = f"리뷰 {new_reviews}건 신규 저장 / {total_r}건 수집"
+                        cs_msg = f"CS {new_cs}건 신규 / {total_cs}건 수집" if total_cs > 0 else ""
+                        st.success(f"✅ [{channel}] {review_msg}" + (f", {cs_msg}" if cs_msg else ""))
+                        st.caption(f"스냅샷 저장: {exported_path}")
+
+                        if do_analyze and total_r > 0:
                             status_text.text(f"[{channel}] 감정 분석 중...")
                             with db.get_conn() as conn:
-                                ids = [r["id"] for r in conn.execute(
-                                    "SELECT id FROM reviews WHERE channel=? AND sentiment='neutral' ORDER BY id DESC LIMIT 100",
-                                    (channel,)).fetchall()]
+                                ids = [
+                                    r["id"]
+                                    for r in conn.execute(
+                                        "SELECT id FROM reviews WHERE channel=? AND sentiment='neutral' ORDER BY id DESC LIMIT 100",
+                                        (channel,),
+                                    ).fetchall()
+                                ]
                             if ids:
                                 a_r = analyzer.analyze_batch(ids)
                                 st.info(f"  분석 완료: {a_r['processed']}건")
@@ -635,9 +790,13 @@ with tab8:
                         if do_generate_reply:
                             status_text.text(f"[{channel}] 답변 생성 중...")
                             with db.get_conn() as conn:
-                                ids = [r["id"] for r in conn.execute(
-                                    "SELECT id FROM reviews WHERE channel=? AND reply_draft IS NULL ORDER BY id DESC LIMIT 50",
-                                    (channel,)).fetchall()]
+                                ids = [
+                                    r["id"]
+                                    for r in conn.execute(
+                                        "SELECT id FROM reviews WHERE channel=? AND reply_draft IS NULL ORDER BY id DESC LIMIT 50",
+                                        (channel,),
+                                    ).fetchall()
+                                ]
                             if ids:
                                 r_r = reply_generator.generate_replies_batch(ids)
                                 st.info(f"  답변 생성: {r_r['generated']}건")
@@ -646,9 +805,12 @@ with tab8:
                             status_text.text(f"[{channel}] 답변 자동 등록 중...")
                             p_r = auto_poster.post_review_replies(channel=channel)
                             st.info(f"  자동 등록: {p_r['posted']}건 성공 / {p_r['failed']}건 실패")
+
                 except Exception as e:
                     st.error(f"[{channel}] 수집 오류: {e}")
+
                 progress.progress((ch_idx + 1) / len(selected_channels))
+
             status_text.text("수집 완료!")
             if st.button("📊 대시보드에서 결과 보기", type="primary"):
                 st.rerun()
@@ -660,38 +822,80 @@ with tab8:
 with tab9:
     st.subheader("💬 답변 관리")
 
-    col_f1, col_f2, col_f3 = st.columns(3)
+    reset_col1, reset_col2 = st.columns([1, 3])
+    with reset_col1:
+        reset_channel = st.selectbox("초기화 채널", ["전체"] + list(CRAWLERS.keys()), key="reset_ch")
+        if st.button("🗑 답변 관리 초기화", help="reviews / cs_items 를 초기화합니다"):
+            target_channel = None if reset_channel == "전체" else reset_channel
+            reset_reply_management_data(target_channel=target_channel)
+            st.success("답변 관리 데이터 초기화 완료")
+            st.rerun()
+
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
     with col_f1:
         filter_channel = st.selectbox("채널 필터", ["전체"] + list(CRAWLERS.keys()), key="f_ch")
     with col_f2:
         filter_status = st.selectbox(
             "상태 필터",
             ["pending (미답변)", "review_needed (검토필요)", "posted (완료)", "전체"],
-            key="f_st"
+            key="f_st",
         )
     with col_f3:
         filter_type = st.selectbox("유형", ["리뷰", "CS 문의"], key="f_type")
+    with col_f4:
+        date_options = get_collection_date_options("reviews" if filter_type == "리뷰" else "cs_items")
+        filter_collected_date = st.selectbox("수집일", ["전체"] + date_options, key="f_cd")
 
-    status_map = {"pending (미답변)": "pending", "review_needed (검토필요)": "review_needed",
-                  "posted (완료)": "posted", "전체": None}
+    # 리뷰 작성일 범위 필터 (리뷰 유형 선택 시에만 표시)
+    review_date_from = None
+    review_date_to = None
+    if filter_type == "리뷰":
+        col_d1, col_d2, col_d3 = st.columns([1, 1, 2])
+        with col_d1:
+            review_date_from = st.date_input("리뷰 작성일 시작", value=None, key="f_rd_from")
+        with col_d2:
+            review_date_to = st.date_input("리뷰 작성일 종료", value=None, key="f_rd_to")
+        with col_d3:
+            st.caption("리뷰 작성일 기준 필터 (비워두면 전체)")
+
+    status_map = {
+        "pending (미답변)": "pending",
+        "review_needed (검토필요)": "review_needed",
+        "posted (완료)": "posted",
+        "전체": None,
+    }
     ch_filter = None if filter_channel == "전체" else filter_channel
     st_filter = status_map[filter_status]
+    collected_date_filter = None if filter_collected_date == "전체" else filter_collected_date
+    date_from_str = review_date_from.strftime("%Y-%m-%d") if review_date_from else None
+    date_to_str = review_date_to.strftime("%Y-%m-%d") if review_date_to else None
 
     col_btn1, _ = st.columns([1, 3])
     with col_btn1:
-        if st.button("⚡ 전체 자동 등록", type="primary",
-                     help="pending 상태 + 위험 아님 항목을 일괄 등록"):
+        if st.button("⚡ 전체 자동 등록", type="primary", help="pending 상태 + 위험 아님 항목을 일괄 등록"):
             with st.spinner("자동 등록 중..."):
-                result = (auto_poster.post_review_replies(channel=ch_filter)
-                          if filter_type == "리뷰"
-                          else auto_poster.post_cs_replies(channel=ch_filter))
+                result = (
+                    auto_poster.post_review_replies(channel=ch_filter)
+                    if filter_type == "리뷰"
+                    else auto_poster.post_cs_replies(channel=ch_filter)
+                )
             st.success(f"등록 완료: {result['posted']}건 성공 / {result['failed']}건 실패")
             st.rerun()
 
     st.divider()
-    items = (db.get_reviews(channel=ch_filter, status=st_filter, limit=50)
-             if filter_type == "리뷰"
-             else db.get_cs_items(channel=ch_filter, status=st_filter, limit=50))
+
+    items = (
+        get_reviews_filtered(
+            channel=ch_filter,
+            status=st_filter,
+            collected_date=collected_date_filter,
+            date_from=date_from_str,
+            date_to=date_to_str,
+            limit=500,
+        )
+        if filter_type == "리뷰"
+        else get_cs_filtered(channel=ch_filter, status=st_filter, collected_date=collected_date_filter, limit=500)
+    )
 
     if not items:
         st.info("해당 조건의 데이터가 없습니다.")
@@ -707,22 +911,38 @@ with tab9:
             rating_str = f"⭐{item['rating']}" if item.get("rating") else ""
             risk_flag = "🚨 위험" if is_risk else ""
             status_icon = {"pending": "🔵", "review_needed": "🔴", "posted": "✅"}.get(status, "⚪")
-            label = (f"{status_icon} [{item.get('channel','')}] "
-                     f"{item.get('product_name','') or item.get('title','')} "
-                     f"{rating_str} {risk_flag}")
+            label = (
+                f"{status_icon} [{item.get('channel', '')}] "
+                f"{item.get('product_name', '') or item.get('title', '')} "
+                f"{rating_str} {risk_flag}"
+            )
 
             with st.expander(label, expanded=False):
                 col_info, col_reply = st.columns([1, 1])
                 with col_info:
                     if filter_type == "리뷰":
-                        st.text_area("리뷰 내용", value=item.get("content",""), height=120,
-                                     disabled=True, key=f"content_{item['id']}")
+                        st.text_area(
+                            "리뷰 내용",
+                            value=item.get("content", ""),
+                            height=120,
+                            disabled=True,
+                            key=f"content_{item['id']}",
+                        )
                     else:
-                        st.markdown(f"**{item.get('title','')}**")
-                        st.text_area("내용", value=item.get("content",""), height=100,
-                                     disabled=True, key=f"cs_content_{item['id']}")
-                    date_val = item.get("review_date") or item.get("inquiry_date","")
-                    st.caption(f"날짜: {date_val}")
+                        st.markdown(f"**{item.get('title', '')}**")
+                        st.text_area(
+                            "내용",
+                            value=item.get("content", ""),
+                            height=100,
+                            disabled=True,
+                            key=f"cs_content_{item['id']}",
+                        )
+                    date_val = item.get("review_date") or item.get("inquiry_date", "")
+                    st.caption(f"리뷰일: {date_val or '-'}")
+                    if item.get("collected_at"):
+                        st.caption(f"수집일시: {item['collected_at']}")
+                    if item.get("collected_at"):
+                        st.caption(f"수집시각: {item['collected_at']}")
                     if item.get("customer_id"):
                         st.caption(f"고객 아이디: {item['customer_id']}")
                     if tags:
@@ -733,11 +953,13 @@ with tab9:
                 with col_reply:
                     current_draft = item.get("reply_draft") or ""
                     if not current_draft:
-                        if st.button("✨ 답변 생성", key=f"gen_{item['id']}"):
+                        if st.button("✨ 답변 생성", key=f"gen_{filter_type}_{item['id']}"):
                             with st.spinner("생성 중..."):
-                                draft = (reply_generator.generate_reply(item)
-                                         if filter_type == "리뷰"
-                                         else reply_generator.generate_cs_reply(item))
+                                draft = (
+                                    reply_generator.generate_reply(item)
+                                    if filter_type == "리뷰"
+                                    else reply_generator.generate_cs_reply(item)
+                                )
                                 new_status = "review_needed" if is_risk else "pending"
                                 if filter_type == "리뷰":
                                     db.update_review_reply(item["id"], draft, new_status)
@@ -745,25 +967,34 @@ with tab9:
                                     db.update_cs_reply(item["id"], draft, new_status)
                             st.rerun()
                     else:
-                        edited = st.text_area("답변 초안", value=current_draft, height=140,
-                                              key=f"draft_{item['id']}")
+                        edited = st.text_area(
+                            "답변 초안",
+                            value=current_draft,
+                            height=140,
+                            key=f"draft_{filter_type}_{item['id']}",
+                        )
                         col_save, col_post = st.columns(2)
-                        if col_save.button("💾 저장", key=f"save_{item['id']}"):
+                        if col_save.button("💾 저장", key=f"save_{filter_type}_{item['id']}"):
                             if filter_type == "리뷰":
                                 db.update_review_reply(item["id"], edited)
                             else:
                                 db.update_cs_reply(item["id"], edited)
-                            st.success("저장됨"); st.rerun()
+                            st.success("저장됨")
+                            st.rerun()
                         if col_post.button(
                             "✅ 완료" if status == "posted" else "📤 등록",
-                            key=f"post_{item['id']}", disabled=(status == "posted")
+                            key=f"post_{filter_type}_{item['id']}",
+                            disabled=(status == "posted"),
                         ):
                             with st.spinner("등록 중..."):
-                                ok = (auto_poster.post_single_review_reply(item["id"])
-                                      if filter_type == "리뷰"
-                                      else auto_poster.post_single_cs_reply(item["id"]))
-                            (st.success("등록 완료!") if ok else st.error("등록 실패"))
-                            if ok: st.rerun()
+                                ok = (
+                                    auto_poster.post_single_review_reply(item["id"])
+                                    if filter_type == "리뷰"
+                                    else auto_poster.post_single_cs_reply(item["id"])
+                                )
+                            st.success("등록 완료!") if ok else st.error("등록 실패")
+                            if ok:
+                                st.rerun()
 
 
 # ══════════════════════════════════════════════════
@@ -791,9 +1022,9 @@ with tab10:
         st.markdown("#### 감정 분포 트렌드 (일별)")
         trend = analyzer.get_sentiment_trend(days_back=period_days)
         if trend:
-            df_trend = pd.DataFrame(trend).rename(columns={
-                "review_date": "날짜", "positive": "긍정", "negative": "부정", "neutral": "중립"
-            })
+            df_trend = pd.DataFrame(trend).rename(
+                columns={"review_date": "날짜", "positive": "긍정", "negative": "부정", "neutral": "중립"}
+            )
             st.line_chart(df_trend.set_index("날짜")[["긍정", "부정", "중립"]])
         else:
             st.info("트렌드 데이터가 없습니다.")
@@ -802,15 +1033,18 @@ with tab10:
         st.markdown("#### 채널별 통계 요약")
         stats = db.get_review_stats()
         if stats:
-            rows = [{
-                "채널": ch,
-                "총 리뷰": s.get("total", 0),
-                "평균 평점": round(s.get("avg_rating") or 0, 1),
-                "부정 리뷰": s.get("neg_count", 0),
-                "부정 비율(%)": round(100 * s.get("neg_count", 0) / max(s.get("total", 1), 1), 1),
-                "미답변": s.get("pending_count", 0),
-                "위험": s.get("risk_count", 0),
-            } for ch, s in stats.items()]
+            rows = [
+                {
+                    "채널": ch,
+                    "총 리뷰": s.get("total", 0),
+                    "평균 평점": round(s.get("avg_rating") or 0, 1),
+                    "부정 리뷰": s.get("neg_count", 0),
+                    "부정 비율(%)": round(100 * s.get("neg_count", 0) / max(s.get("total", 1), 1), 1),
+                    "미답변": s.get("pending_count", 0),
+                    "위험": s.get("risk_count", 0),
+                }
+                for ch, s in stats.items()
+            ]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
             st.info("통계 데이터가 없습니다.")
@@ -823,9 +1057,12 @@ with tab10:
             df_claim.columns = ["상품명", "옵션", "채널", "총 리뷰", "부정 리뷰", "클레임율(%)"]
             st.dataframe(df_claim, use_container_width=True, hide_index=True)
             csv = df_claim.to_csv(index=False, encoding="utf-8-sig")
-            st.download_button("📥 CSV 다운로드", data=csv.encode("utf-8-sig"),
-                               file_name=f"claim_rate_{datetime.now().strftime('%Y%m%d')}.csv",
-                               mime="text/csv")
+            st.download_button(
+                "📥 CSV 다운로드",
+                data=csv.encode("utf-8-sig"),
+                file_name=f"claim_rate_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
         else:
             st.info("클레임율 데이터가 없습니다.")
     except ImportError:
